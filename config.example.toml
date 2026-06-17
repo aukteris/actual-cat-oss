@@ -1,0 +1,103 @@
+[actual]
+base_url = "http://localhost:5006"
+file = "My-Finances"
+# ACTUAL_PASSWORD and ACTUAL_ENCRYPTION_PASSWORD come from .env, never config.toml
+
+# ── Local llama.cpp setup (default) ─────────────────────────────────────────
+[llm]
+endpoint = "http://localhost:8900/v1"
+# Server-side llama.cpp alias. Sampling below is pinned regardless of the
+# preset's own defaults, so any model swap keeps categorization behavior stable.
+model = "qwen35-122b"
+# Sampling is pinned here rather than inherited from the server preset, so swapping
+# the base preset (or its sampling defaults) can't change categorization behavior.
+temperature = 0.2
+top_p = 0.85
+presence_penalty = 1.0
+# json_mode = true   # send response_format=json_object (default); set false if your
+                     # model rejects it (the code-fence fallback still works)
+
+# llama.cpp-specific sampling params — send verbatim in extra_body.
+# Omit this entire table when using a cloud provider.
+[llm.extra_body]
+top_k = 20
+min_p = 0.05
+chat_template_kwargs = { enable_thinking = false }   # keep reasoning off for JSON
+
+# ── Optional: separate vision model (e.g. local text + cloud OCR) ────────────
+# Omit [llm.vision] entirely to use the same model for text and vision.
+# [llm.vision]
+# endpoint = "https://openrouter.ai/api/v1"
+# model    = "google/gemini-2.5-flash"
+# json_mode = true
+# LLM_VISION_API_KEY from .env
+
+# ── Cloud provider examples (comment out the local block above, uncomment one) ─
+#
+# OpenRouter (any model):
+# [llm]
+# endpoint = "https://openrouter.ai/api/v1"
+# model    = "google/gemini-2.5-flash"
+# json_mode = true
+# # LLM_API_KEY from .env; omit [llm.extra_body]
+#
+# Google Gemini (OpenAI-compat endpoint):
+# [llm]
+# endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/"
+# model    = "gemini-2.5-flash"
+# json_mode = true
+# # LLM_API_KEY from .env; omit [llm.extra_body]
+#
+# OpenAI:
+# [llm]
+# endpoint = "https://api.openai.com/v1"
+# model    = "gpt-4o-mini"
+# json_mode = true
+# # LLM_API_KEY from .env; omit [llm.extra_body]
+
+[categorization]
+mode = "suggest"                  # "suggest" | "apply"
+apply_confidence_threshold = "high"
+
+[transfers]
+mode = "suggest"
+window_days = 3
+apply_confidence_threshold = "high"
+
+[audit]
+log_path = "logs/actual-cat.jsonl"
+
+[paths]
+ca_bundle = "/etc/ssl/certs/ca-certificates.crt"
+
+# Receipt-driven transaction splitting (all sections optional; feature is off by default)
+
+[receipts]
+enabled = false
+store_path = "receipts"          # directory for inbox/pending/done receipt records
+match_window_days = 3            # ± days around receipt date to search for matching txn
+expiry_days = 30                 # unmatched receipts expire after this many days
+mode = "suggest"                 # "suggest" | "apply"
+apply_confidence_threshold = "high"
+
+[email]
+enabled = false
+imap_host = "imap.example.com"
+user = "receipts@example.com"
+mailbox = "INBOX"
+# IMAP_PASSWORD comes from .env
+
+[receiver]
+host = "127.0.0.1"
+port = 8001
+# RECEIPT_RECEIVER_TOKEN comes from .env
+
+[history]
+# Feed past categorizations from the budget into both pipelines as hints:
+#   - single transactions get this payee's prior categories
+#   - receipt line items get prior categories for the same item description
+# History is read from the live budget, so manual corrections feed back in.
+enabled = true
+payee_top_n = 3    # prior categories to surface per payee (single transactions)
+item_top_n = 3     # prior categories to surface per item description (receipt splits)
+min_count = 1      # ignore categorizations seen fewer than this many times

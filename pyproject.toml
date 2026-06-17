@@ -1,0 +1,51 @@
+[project]
+name = "actual-cat"
+version = "0.1.0"
+description = "AI-assisted transaction categorization worker for Actual Budget"
+requires-python = ">=3.11"
+dependencies = [
+    "actualpy>=0.9.0",
+    "openai>=1.30.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.111.0",
+    "python-multipart>=0.0.12",
+    "uvicorn[standard]>=0.29.0",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "pytest-mock",
+    "ruff",
+    "mypy",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["actual_cat*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: live tests against DevBudget (require ACTUAL_PASSWORD)",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+# The `actual` library ships no py.typed marker / stubs; don't flag its imports.
+[[tool.mypy.overrides]]
+module = ["actual", "actual.*"]
+ignore_missing_imports = true
