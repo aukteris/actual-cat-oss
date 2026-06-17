@@ -26,7 +26,12 @@ def main() -> None:
         os.environ["REQUESTS_CA_BUNDLE"] = cfg.ca_bundle
         os.environ["SSL_CERT_FILE"] = cfg.ca_bundle
 
-    llm = LLMClient(cfg.llm_text, cfg.llm_vision)
+    llm = LLMClient(
+        cfg.llm_text,
+        cfg.llm_vision,
+        requests_per_minute=cfg.llm_requests_per_minute,
+        max_retries=cfg.llm_max_retries,
+    )
     audit = AuditLogger(cfg.audit_log_path)
 
     kwargs: dict[str, Any] = dict(

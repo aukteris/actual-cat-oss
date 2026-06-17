@@ -60,16 +60,31 @@ def test_legacy_keys_synthesize_extra_body() -> None:
     }
 
 
-def test_legacy_keys_defaults() -> None:
+def test_no_extra_body_no_legacy_keys_is_cloud_safe() -> None:
+    # No [extra_body] block and no legacy top-level keys: send nothing
+    # provider-specific, so cloud providers (e.g. Gemini) don't 400.
+    import tomllib
+    raw = tomllib.loads(textwrap.dedent("""
+        endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        model = "gemini-2.5-flash"
+    """))
+    text, _ = _load_llm_profiles(raw)
+    assert text.extra_body == {}
+
+
+def test_partial_legacy_keys_still_synthesize() -> None:
+    # A single legacy key present means the user is on the llama.cpp style;
+    # synthesize the full block (missing keys fall back to defaults).
     import tomllib
     raw = tomllib.loads(textwrap.dedent("""
         endpoint = "http://local/v1"
         model = "my-model"
+        min_p = 0.1
     """))
     text, _ = _load_llm_profiles(raw)
     assert text.extra_body == {
         "top_k": 20,
-        "min_p": 0.05,
+        "min_p": 0.1,
         "chat_template_kwargs": {"enable_thinking": False},
     }
 
@@ -274,3 +289,36 @@ def test_load_config_vision_block_overrides(
     assert cfg.llm_text.model == "text-model"
     assert cfg.llm_vision.model == "vision-model"
     assert cfg.llm_vision.endpoint == "https://cloud/v1"
+
+
+def test_load_config_rate_limit_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    toml_path = _make_toml(tmp_path, textwrap.dedent("""
+        [llm]
+        endpoint = "http://local/v1"
+        model = "my-model"
+    """))
+    cfg = load_config(str(toml_path))
+    # Omitted [llm.rate_limit] → no throttle, SDK default retries.
+    assert cfg.llm_requests_per_minute == 0
+    assert cfg.llm_max_retries == 2
+
+
+def test_load_config_rate_limit_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    toml_path = _make_toml(tmp_path, textwrap.dedent("""
+        [llm]
+        endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        model = "gemini-2.5-flash"
+
+        [llm.rate_limit]
+        requests_per_minute = 15
+        max_retries = 5
+    """))
+    cfg = load_config(str(toml_path))
+    assert cfg.llm_requests_per_minute == 15
+    assert cfg.llm_max_retries == 5

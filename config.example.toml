@@ -47,6 +47,7 @@ chat_template_kwargs = { enable_thinking = false }   # keep reasoning off for JS
 # model    = "gemini-2.5-flash"
 # json_mode = true
 # # LLM_API_KEY from .env; omit [llm.extra_body]
+# # On the free tier, add [llm.rate_limit] below to stay under the quota.
 #
 # OpenAI:
 # [llm]
@@ -54,6 +55,13 @@ chat_template_kwargs = { enable_thinking = false }   # keep reasoning off for JS
 # model    = "gpt-4o-mini"
 # json_mode = true
 # # LLM_API_KEY from .env; omit [llm.extra_body]
+
+# ── Optional: client-side rate limiting (cloud free tiers) ───────────────────
+# Throttle outgoing requests and let the OpenAI SDK ride out 429s. Omit this
+# table entirely for local servers (no throttle, SDK default of 2 retries).
+# [llm.rate_limit]
+# requests_per_minute = 15   # 0/omitted = no throttle; set to your provider's RPM
+# max_retries = 5            # SDK retries on 429 w/ backoff, honoring Retry-After
 
 [categorization]
 mode = "suggest"                  # "suggest" | "apply"

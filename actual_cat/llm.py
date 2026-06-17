@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,9 +36,24 @@ class LLMProfile:
 
 
 class LLMClient:
-    def __init__(self, text: LLMProfile, vision: LLMProfile | None = None) -> None:
+    def __init__(
+        self,
+        text: LLMProfile,
+        vision: LLMProfile | None = None,
+        *,
+        requests_per_minute: int = 0,
+        max_retries: int = 2,
+    ) -> None:
+        """requests_per_minute throttles outgoing calls client-side (0 = no throttle,
+        for local servers). max_retries is handed to the OpenAI SDK, which retries
+        429s with exponential backoff and honors Retry-After — useful for cloud free
+        tiers. The throttle is shared across the text and vision profiles, since both
+        draw on the same provider quota."""
         self.text = text
         self.vision = vision or text
+        self._max_retries = max_retries
+        self._min_interval = 60.0 / requests_per_minute if requests_per_minute > 0 else 0.0
+        self._last_call: float | None = None
         self._clients: dict[tuple[str, str], OpenAI] = {}
         self._text_client = self._client_for(self.text)
         self._vision_client = self._client_for(self.vision)
@@ -47,9 +63,24 @@ class LLMClient:
         key = (profile.endpoint, profile.api_key)
         client = self._clients.get(key)
         if client is None:
-            client = OpenAI(base_url=profile.endpoint, api_key=profile.api_key)
+            client = OpenAI(
+                base_url=profile.endpoint,
+                api_key=profile.api_key,
+                max_retries=self._max_retries,
+            )
             self._clients[key] = client
         return client
+
+    def _throttle(self) -> None:
+        """Block until at least _min_interval has elapsed since the last call, so a
+        fast cloud endpoint doesn't blow past a free-tier requests-per-minute quota."""
+        if self._min_interval <= 0.0:
+            return
+        if self._last_call is not None:
+            wait = self._min_interval - (time.monotonic() - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+        self._last_call = time.monotonic()
 
     def _complete(
         self,
@@ -81,6 +112,7 @@ class LLMClient:
         for _attempt in range(retries + 1):
             content = ""
             try:
+                self._throttle()
                 resp = client.chat.completions.create(**kwargs)
                 content = _CODE_FENCE_RE.sub("", resp.choices[0].message.content or "").strip()
                 return json.loads(content)  # type: ignore[no-any-return]

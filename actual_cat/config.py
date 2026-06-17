@@ -16,6 +16,8 @@ class Config:
     encryption_password: str | None  # None for plaintext budgets
     llm_text: LLMProfile
     llm_vision: LLMProfile           # falls back to llm_text when not configured
+    llm_requests_per_minute: int     # client-side throttle; 0 = no throttle
+    llm_max_retries: int             # OpenAI SDK retries on 429 (honors Retry-After)
     categorization_mode: str         # "suggest" | "apply"
     categorization_threshold: str    # "high" | "medium" | "low"
     transfer_mode: str
@@ -59,18 +61,21 @@ def _load_llm_profiles(llm: dict[str, object]) -> tuple[LLMProfile, LLMProfile]:
     text_api_key = os.environ.get("LLM_API_KEY") or "not-needed"
     vision_api_key = os.environ.get("LLM_VISION_API_KEY") or text_api_key
 
-    # [llm.extra_body] takes precedence; fall back to synthesizing from legacy keys.
+    # [llm.extra_body] takes precedence. Otherwise synthesize from legacy top-level
+    # keys ONLY when they're actually present, so cloud providers (which omit both
+    # the block and the legacy keys) get an empty extra_body and aren't sent
+    # llama.cpp-specific params they'd reject with a 400.
+    legacy_keys = ("top_k", "min_p", "enable_thinking")
     if "extra_body" in llm:
         text_extra: dict[str, object] = dict(cast(dict[str, object], llm["extra_body"]))
-    else:
-        top_k = llm.get("top_k", 20)
-        min_p = llm.get("min_p", 0.05)
-        enable_thinking = llm.get("enable_thinking", False)
+    elif any(k in llm for k in legacy_keys):
         text_extra = {
-            "top_k": top_k,
-            "min_p": min_p,
-            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+            "top_k": llm.get("top_k", 20),
+            "min_p": llm.get("min_p", 0.05),
+            "chat_template_kwargs": {"enable_thinking": llm.get("enable_thinking", False)},
         }
+    else:
+        text_extra = {}  # cloud-safe: nothing provider-specific to send
 
     text = LLMProfile(
         endpoint=str(llm["endpoint"]),
@@ -115,6 +120,7 @@ def load_config(path: str = "config.toml") -> Config:
     encryption_password = os.environ.get("ACTUAL_ENCRYPTION_PASSWORD") or None
 
     llm_text, llm_vision = _load_llm_profiles(raw["llm"])
+    rate_limit = raw["llm"].get("rate_limit", {})
 
     receipts = raw.get("receipts", {})
     email = raw.get("email", {})
@@ -128,6 +134,8 @@ def load_config(path: str = "config.toml") -> Config:
         encryption_password=encryption_password,
         llm_text=llm_text,
         llm_vision=llm_vision,
+        llm_requests_per_minute=rate_limit.get("requests_per_minute", 0),
+        llm_max_retries=rate_limit.get("max_retries", 2),
         categorization_mode=raw["categorization"]["mode"],
         categorization_threshold=raw["categorization"]["apply_confidence_threshold"],
         transfer_mode=raw["transfers"]["mode"],

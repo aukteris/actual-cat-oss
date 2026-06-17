@@ -41,7 +41,9 @@ rule engine  →  transfer detection  →  receipt splitting  →  categorizatio
   API keys come from `.env` (`LLM_API_KEY`, `LLM_VISION_API_KEY`); local servers
   need no key. Provider-specific sampling params go in `[llm.extra_body]`; omit it
   entirely for standard cloud providers. For cloud HTTPS leave `[paths].ca_bundle`
-  unset so the system trust store validates public certificates.
+  unset so the system trust store validates public certificates. On a free tier,
+  `[llm.rate_limit]` throttles requests (`requests_per_minute`) and tunes 429
+  retries (`max_retries`).
 - Every decision is written to a JSONL audit log for later review.
 - All writes are tags prepended to the notes field; original notes are preserved.
 
@@ -124,7 +126,14 @@ Secrets (`ACTUAL_PASSWORD`, `ACTUAL_ENCRYPTION_PASSWORD`, and LLM API keys) live
 
 Standard sampling params (`temperature`, `top_p`, `presence_penalty`) are always
 sent. Provider-specific params go in `[llm.extra_body]` and are passed verbatim —
-cloud providers that reject unknown fields should omit this table entirely.
+cloud providers that reject unknown fields should omit this table entirely. With no
+`[llm.extra_body]` block and no legacy top-level `top_k`/`min_p`/`enable_thinking`
+keys, nothing provider-specific is sent (cloud-safe).
+
+For cloud free tiers, an optional `[llm.rate_limit]` table caps request volume:
+`requests_per_minute` (0/omitted = no throttle) spaces calls out client-side, and
+`max_retries` (default 2) controls how many times the OpenAI SDK retries a 429 with
+exponential backoff, honoring the provider's `Retry-After`.
 
 `json_mode = true` (default) sends `response_format: json_object`. Set false for
 models that reject it — the response parser strips code fences as a fallback.

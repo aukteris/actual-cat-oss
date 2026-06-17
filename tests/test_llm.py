@@ -265,3 +265,69 @@ def test_code_fence_stripped_before_json_parse() -> None:
     client._text_client.chat.completions.create = fake_create  # type: ignore[method-assign]
     result = client.complete_json("s", "u")
     assert result == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting: client-side throttle + SDK max_retries
+# ---------------------------------------------------------------------------
+
+
+def test_throttle_waits_between_calls(monkeypatch: Any) -> None:
+    import actual_cat.llm as llm_mod
+
+    # Fake clock that advances only when we sleep, so the throttle is deterministic.
+    now = [1000.0]
+    sleeps: list[float] = []
+    monkeypatch.setattr(llm_mod.time, "monotonic", lambda: now[0])
+
+    def fake_sleep(secs: float) -> None:
+        sleeps.append(secs)
+        now[0] += secs
+
+    monkeypatch.setattr(llm_mod.time, "sleep", fake_sleep)
+
+    profile = _text_profile()
+    client = LLMClient(profile, requests_per_minute=60)  # 1s min interval
+
+    def fake_create(**kwargs: Any) -> MagicMock:
+        return _mock_response('{"ok": true}')
+
+    client._text_client.chat.completions.create = fake_create  # type: ignore[method-assign]
+
+    client.complete_json("s", "u")  # first call: no wait
+    client.complete_json("s", "u")  # second call: full interval, clock didn't move
+    assert sleeps == [1.0]
+
+
+def test_no_throttle_when_rpm_zero(monkeypatch: Any) -> None:
+    import actual_cat.llm as llm_mod
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: sleeps.append(s))
+
+    profile = _text_profile()
+    client = LLMClient(profile, requests_per_minute=0)
+
+    def fake_create(**kwargs: Any) -> MagicMock:
+        return _mock_response('{"ok": true}')
+
+    client._text_client.chat.completions.create = fake_create  # type: ignore[method-assign]
+    client.complete_json("s", "u")
+    client.complete_json("s", "u")
+    assert sleeps == []
+
+
+def test_max_retries_passed_to_openai_client(monkeypatch: Any) -> None:
+    import actual_cat.llm as llm_mod
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_openai(**kwargs: Any) -> MagicMock:
+        captured.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(llm_mod, "OpenAI", fake_openai)
+
+    profile = _text_profile()
+    LLMClient(profile, max_retries=5)
+    assert captured[0]["max_retries"] == 5
