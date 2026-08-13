@@ -39,7 +39,7 @@ from actual_cat.duplicates import (  # noqa: E402
     matches_cluster,
     propose_candidates,
 )
-from actual_cat.sync_meta import parse_synced  # noqa: E402
+from actual_cat.sync_meta import is_pending, parse_synced  # noqa: E402
 
 
 def was_pending(txn: Any) -> bool:
@@ -48,6 +48,12 @@ def was_pending(txn: Any) -> bool:
     Deliberately not sync_meta.is_pending(): a row deleted while pending keeps
     cleared = 0, but a row that cleared before being deleted does not, and both
     belong to the labeled history.
+
+    Use this only to build the positive set. It must never gate which rows can
+    be a *posted counterpart* — `booked` is a snapshot that is never refreshed,
+    so a posted row that arrived pending still reports false here forever, and
+    excluding those discards the very survivors the matcher needs. That gate is
+    is_pending(), the cleared-aware conjunction the pipeline itself uses.
     """
     payload = parse_synced(txn)
     return payload is not None and payload.get("booked") is False
@@ -85,7 +91,7 @@ def candidates_for(
             if r.acct == cluster[0].acct
             and r.id not in cluster_ids
             and not r.is_child
-            and not was_pending(r)
+            and not is_pending(r)
             and _within_window(cluster, r, window)
             and matches_cluster(cluster, r)
         ]
@@ -136,10 +142,13 @@ def main() -> None:
         negatives = [r for r in survivors if not was_pending(r)][-args.negatives:]
 
         recovered_ids: set[str] = set()
+        held_ids: set[str] = set()
         by_rule: Counter[str] = Counter()
         for candidate in candidates_for(positives, survivors, cfg):
             by_rule[candidate.rule] += 1
-            if candidate.rule != "ambiguous":
+            if candidate.rule == "ambiguous":
+                held_ids.update(r.id for r in candidate.pending)
+            else:
                 recovered_ids.update(r.id for r in candidate.pending)
 
         # Pretend each never-pending row was pending and see whether the rules
@@ -150,6 +159,10 @@ def main() -> None:
             "positives": len(positives),
             "recovered": len(recovered_ids),
             "recall": round(len(recovered_ids) / len(positives), 3) if positives else None,
+            # Held rows are surfaced for review rather than acted on, so they are
+            # neither a hit nor a miss — counting them as misses understates the
+            # matcher and hides the fact that it did the right thing.
+            "held": len(held_ids - recovered_ids),
             "by_rule": dict(by_rule),
             "negatives": len(negatives),
             "spurious": len(spurious),
@@ -174,15 +187,20 @@ def main() -> None:
         for rule, count in sorted(by_rule.items()):
             print(f"               {rule:<12} {count}")
 
+        held_only = held_ids - recovered_ids
+        if held_only:
+            print(f"\n  Held       {len(held_only)} more surfaced for review rather than acted "
+                  f"on (several booked candidates)")
+
         if negatives:
             print(f"\n  Spurious   {len(spurious)}/{len(negatives)} never-pending rows would "
                   f"have been proposed ({len(spurious) / len(negatives):.1%})")
             print("             Stage 2 adjudication exists to remove these; this is the")
             print("             rate the prompt has to beat, not a defect.")
 
-        missed = [r for r in positives if r.id not in recovered_ids]
+        missed = [r for r in positives if r.id not in recovered_ids and r.id not in held_ids]
         if missed:
-            print(f"\n  Missed ({len(missed)}):")
+            print(f"\n  Missed ({len(missed)}) — neither proposed nor held:")
             for row in missed[:20]:
                 print(f"    {row.get_date()}  {row.amount / 100:>10.2f}  "
                       f"{(row.imported_description or '')[:40]}")
