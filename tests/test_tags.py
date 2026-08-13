@@ -1,6 +1,7 @@
 from actual_cat.tags import (
     append_tag,
     has_ai_marker,
+    has_duplicate_marker,
     slugify_category,
     strip_category_tag,
 )
@@ -30,6 +31,23 @@ class TestHasAiMarker:
 
     def test_non_marker_hash(self):
         assert not has_ai_marker("#tax:deductible:home")
+
+
+class TestDuplicateMarkers:
+    def test_suggested_duplicate_hides_row_from_categorization(self):
+        assert has_ai_marker("#ai-suggested-duplicate GREEN GROCER")
+
+    def test_review_tag_hides_row_from_categorization(self):
+        assert has_ai_marker("#ai-duplicate-review GREEN GROCER")
+
+    def test_has_duplicate_marker_matches_both(self):
+        assert has_duplicate_marker("#ai-suggested-duplicate")
+        assert has_duplicate_marker("memo #ai-duplicate-review")
+
+    def test_has_duplicate_marker_ignores_other_pipelines(self):
+        assert not has_duplicate_marker("#ai-suggested-transfer")
+        assert not has_duplicate_marker("#ai:groceries-food")
+        assert not has_duplicate_marker(None)
 
 
 class TestSlugifyCategory:

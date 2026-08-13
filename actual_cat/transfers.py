@@ -3,6 +3,7 @@
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from .sync_meta import is_pending
 from .tags import append_tag, strip_category_tag
 
 if TYPE_CHECKING:
@@ -11,10 +12,16 @@ if TYPE_CHECKING:
     from .llm import LLMClient
 
 
-def find_transfer_candidates(session: Any, txn: Any, window_days: int) -> list[Any]:
+def find_transfer_candidates(
+    session: Any, txn: Any, window_days: int, defer_pending: bool = False
+) -> list[Any]:
     """Find inverse-amount transactions in other accounts within the date window.
 
     Spike-confirmed: transfer linkage field is transferred_id; account FK is acct.
+
+    defer_pending excludes rows the bank hasn't finalized from the partner side
+    too, not just the driving side: pairing a pending leg leaves its partner
+    pointing at a tombstone if that leg later turns out to be a duplicate.
     """
     from actual.database import Transactions
     from actual.utils.conversions import date_to_int
@@ -26,7 +33,7 @@ def find_transfer_candidates(session: Any, txn: Any, window_days: int) -> list[A
     lo = date_to_int(txn_date - timedelta(days=window_days))
     hi = date_to_int(txn_date + timedelta(days=window_days))
 
-    return list(
+    candidates = (
         session.query(Transactions)
         .filter(
             Transactions.amount == -txn.amount,
@@ -39,6 +46,10 @@ def find_transfer_candidates(session: Any, txn: Any, window_days: int) -> list[A
         )
         .all()
     )
+
+    if defer_pending:
+        return [t for t in candidates if not is_pending(t)]
+    return list(candidates)
 
 
 def render_transfer_prompt(txn_a: Any, txn_b: Any) -> str:
@@ -103,10 +114,12 @@ def process_transfers(
     from .categorization import find_uncategorized
 
     candidates_seen: set[tuple[str, str]] = set()
-    txns = find_uncategorized(actual.session)
+    txns = find_uncategorized(actual.session, cfg.duplicates_defer_pending)
 
     for txn in txns:
-        candidates = find_transfer_candidates(actual.session, txn, cfg.transfer_window_days)
+        candidates = find_transfer_candidates(
+            actual.session, txn, cfg.transfer_window_days, cfg.duplicates_defer_pending
+        )
 
         for partner in candidates:
             pair_id = tuple(sorted([txn.id, partner.id]))

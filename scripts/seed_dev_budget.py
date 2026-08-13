@@ -14,12 +14,14 @@ Covers:
   - Obvious transfer pair (Checking -> Savings, same day)
   - Credit-card payment pair (Checking -> CC, PMT descriptor)
   - Coincidental amount match between two unrelated merchants
+  - Pending/posted duplicate shapes, with --duplicates
 
 Run:
   ACTUAL_PASSWORD=... python scripts/seed_dev_budget.py
 """
 
 import argparse
+import json
 import os
 import sys
 from datetime import date, timedelta
@@ -52,6 +54,9 @@ load_dotenv()
 parser = argparse.ArgumentParser(description="Seed DevBudget with test transactions")
 parser.add_argument("--receipts", action="store_true",
                     help="Also seed a Costco receipt-test transaction and stage its image")
+parser.add_argument("--duplicates", action="store_true",
+                    help="Also seed pending/posted duplicate fixtures (and two lookalikes "
+                         "that must NOT match)")
 parser.add_argument("--store-path", default="receipts",
                     help="Receipt store path (default: receipts)")
 args = parser.parse_args()
@@ -84,7 +89,7 @@ with Actual(base_url=BASE_URL, password=password, file=BUDGET_FILE) as actual:
 
     seeded = []
 
-    def add(account, amount_dollars, payee, notes=None, days_ago=0, txn_date=None):
+    def add(account, amount_dollars, payee, notes=None, days_ago=0, txn_date=None, key=""):
         if account is None:
             print(f"  SKIP (no account): {payee}")
             return None
@@ -95,7 +100,9 @@ with Actual(base_url=BASE_URL, password=password, file=BUDGET_FILE) as actual:
             payee=payee,
             notes=notes,
             amount=amount_dollars,
-            imported_id=f"seed-{payee}-{days_ago}{RUN_TAG}",
+            # `key` disambiguates two same-payee rows seeded on the same day —
+            # without it the stable imported_id would dedupe them into one.
+            imported_id=f"seed-{payee}-{days_ago}{key}{RUN_TAG}",
         )
         seeded.append(txn)
         print(f"  Added: {payee:35s} {amount_dollars:+8.2f}  ({account.name})")
@@ -163,6 +170,87 @@ with Actual(base_url=BASE_URL, password=password, file=BUDGET_FILE) as actual:
     add(cc, -75.00, "Netflix",
         notes="NETFLIX.COM LOS GATOS 95032 CA USA",
         days_ago=11)
+
+    if args.duplicates:
+        print("\nSeeding pending-duplicate fixtures...")
+
+        # create_transaction can't set the bank-sync fields, so they're written
+        # onto the returned rows. `booked: false` + cleared = 0 is what
+        # sync_meta.is_pending() looks for; a booked row keeps cleared = 1.
+        def mark(txn, *, pending, bank_id=None):
+            if txn is None:
+                return None
+            txn.raw_synced_data = json.dumps({
+                "booked": not pending,
+                "cleared": not pending,
+                "date": str(txn.get_date()),
+                "transactionId": bank_id or f"TRN-{txn.id[:8]}",
+                "payeeName": txn.notes or "",
+                "amount": f"{txn.amount / 100:.2f}",
+            })
+            txn.cleared = 0 if pending else 1
+            if bank_id:
+                txn.financial_id = bank_id
+            print(f"    ^ marked {'pending' if pending else 'booked'}")
+            return txn
+
+        # --- Negatives. These matter more than the positives: the rules were
+        # built from the positives, so only the lookalikes can falsify them.
+
+        # Recurring subscription billed the same amount, the newer one still
+        # pending and inside the match window — structurally identical to an
+        # exact duplicate, so only merchant semantics can reject it. The
+        # descriptor also gains a domain suffix, the way a real pair does.
+        mark(add(cc, -129.00, "Tumblewell Gym", notes="TUMBLEWELL GYM ANYTOWN ST USA",
+                 days_ago=6), pending=False)
+        mark(add(cc, -129.00, "Tumblewell Gym", notes="TUMBLEWELL.COM ANYTOWN USA",
+                 days_ago=0), pending=True)
+
+        # Two visits to the same restaurant three days apart, the later pending.
+        # The amounts sit inside the tip band on purpose, so the rules *do*
+        # propose this pair and the LLM is the thing being tested.
+        mark(add(cc, -64.90, "Ramen House", notes="TST* RAMEN HOUSE ANYTOWN ST USA",
+                 days_ago=6), pending=False)
+        mark(add(cc, -58.75, "Ramen House", notes="TST* RAMEN HOUSE ANYTOWN ST USA",
+                 days_ago=3), pending=True)
+
+        # --- Positives.
+
+        # Tip uplift: pending pre-tip, posted three days later with the tip and
+        # the city appended to the descriptor (R3).
+        mark(add(cc, -84.50, "Corner Cantina", notes="TST* CORNER CANTINA US", days_ago=5),
+             pending=True)
+        mark(add(cc, -101.50, "Corner Cantina", notes="TST* CORNER CANTINA ANYTOWN ST",
+                 days_ago=2), pending=False)
+
+        # Posted row dated a day *earlier* than the pending one: it carries the
+        # transaction date where the pending row carried the authorization date.
+        # The shape the date guidance in DUPLICATE_SYSTEM has to protect (R3).
+        mark(add(cc, -76.40, "Barrel House", notes="BARREL HOUSE US", days_ago=4),
+             pending=True)
+        mark(add(cc, -89.90, "Barrel House", notes="BARREL HOUSE ANYTOWN ST", days_ago=5),
+             pending=False)
+
+        # Authorization plus a later adjustment, together the posted row (R2).
+        mark(add(cc, -92.35, "Green Grocer", notes="GREEN GROCER #1234 US", days_ago=5),
+             pending=True)
+        mark(add(cc, -1.65, "Green Grocer", notes="GREEN GROCER #1234 US", days_ago=4),
+             pending=True)
+        mark(add(cc, -94.00, "Green Grocer", notes="GREEN GROCER #1234 ANYTOWN ST",
+                 days_ago=3), pending=False)
+
+        # Real charge plus a $1 authorization probe, one posted survivor (R3+R4).
+        mark(add(cc, -178.60, "Harbor Grill", notes="HARBOR GRILL US", days_ago=6,
+                 key="-charge"), pending=True)
+        mark(add(cc, -1.00, "Harbor Grill", notes="HARBOR GRILL US", days_ago=6,
+                 key="-probe"), pending=True)
+        mark(add(cc, -208.00, "Harbor Grill", notes="HARBOR GRILL ANYTOWN ST", days_ago=3),
+             pending=False)
+
+        print("\n  Expected in suggest mode: Corner Cantina, Barrel House, Green Grocer")
+        print("  (both rows), and Harbor Grill (both rows) tagged")
+        print("  #ai-suggested-duplicate; Tumblewell Gym and Ramen House proposed by")
+        print("  the rules but rejected by the LLM.")
 
     if args.receipts:
         print("\nSeeding receipt-test transaction (Costco, $317.37, yesterday)...")

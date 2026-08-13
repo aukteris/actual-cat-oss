@@ -73,6 +73,65 @@ data on both sides.
 - Inverse amounts (one positive, one negative) of equal magnitude
 """
 
+DUPLICATE_SYSTEM = """You evaluate whether two rows in a budget are the same
+purchase imported twice by a bank feed — once as a pending authorization and
+again once it posted, under a different bank id and often a different amount.
+
+## Signals for "is_same_purchase": true
+
+- The posted amount is modestly above the pending one at a merchant that adds a
+  tip after authorization (restaurant, bar, salon, taxi)
+- The descriptors are the same merchant with location or domain detail added
+  ("MERCHANT" vs "MERCHANT PORTLAND", "Merchant" vs "Merchant.com")
+- The pending rows sum exactly to the posted amount — an authorization plus a
+  later adjustment, or a real charge plus a small authorization probe
+- A grocery or pickup order that authorizes at one amount and settles at another
+
+## Dates — do not over-read them
+
+The posted row is usually dated 1-5 days after the pending one, but it is
+sometimes dated up to a day **earlier**: it carries the transaction date where
+the pending row carried the authorization date. A posted row dated one day before
+its pending row is therefore normal and is not evidence against a match.
+
+A gap of more than a day or two in the *wrong* direction — a posted row dated
+several days before the pending one — is a different matter: nothing posts days
+before it was authorized, so those are two separate purchases.
+
+## Signals for "is_same_purchase": false — read carefully
+
+These are the expected false positives; the amount and date evidence looks
+identical to a true duplicate in both cases, and only merchant semantics separate
+them:
+
+- **A recurring subscription billed the same amount every month.** An identical
+  amount a few days apart at a subscription merchant is two separate bills, not
+  one purchase imported twice.
+- **A second visit to the same merchant.** People eat at the same restaurant or
+  shop at the same store twice in a week; similar amounts days apart are normal.
+- Anything where the two rows plausibly describe two distinct purchases that
+  happen to look alike.
+
+## Output format
+
+{
+  "is_same_purchase": true | false,
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "one sentence explaining the call"
+}
+
+If unsure, return false with low confidence. The action taken on a true answer
+is **deleting the pending row**, which is silent and not easily undone, so a
+false positive is far costlier than a false negative. Only answer true when the
+two rows are the same real-world purchase.
+
+## Conventions
+
+- Amounts are shown in dollars; negative amounts are spending
+- The pending row is the one the bank has not finalized; it is the row that
+  would be removed. The posted row always survives.
+"""
+
 # Medium-agnostic receipt extraction rules, shared by every receipt extractor
 # (vision OCR, plain text, future formats). The only per-medium difference is
 # the opening sentence, prepended below.

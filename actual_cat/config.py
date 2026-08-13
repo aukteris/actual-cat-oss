@@ -32,6 +32,15 @@ class Config:
     receipts_expiry_days: int
     receipts_mode: str               # "suggest" | "apply"
     receipts_threshold: str
+    # pending-duplicate pipeline
+    duplicates_enabled: bool
+    duplicates_mode: str             # "suggest" | "apply"
+    duplicates_window_days: int
+    duplicates_max_uplift_pct: int
+    duplicates_max_reduction_pct: int
+    duplicates_auth_hold_max_cents: int
+    duplicates_threshold: str
+    duplicates_defer_pending: bool   # other pipelines ignore pending rows
     # email ingestion
     email_enabled: bool
     email_imap_host: str
@@ -123,6 +132,7 @@ def load_config(path: str = "config.toml") -> Config:
     rate_limit = raw["llm"].get("rate_limit", {})
 
     receipts = raw.get("receipts", {})
+    duplicates = raw.get("duplicates", {})
     email = raw.get("email", {})
     receiver = raw.get("receiver", {})
     history = raw.get("history", {})
@@ -149,6 +159,16 @@ def load_config(path: str = "config.toml") -> Config:
         receipts_expiry_days=receipts.get("expiry_days", 30),
         receipts_mode=receipts.get("mode", "suggest"),
         receipts_threshold=receipts.get("apply_confidence_threshold", "high"),
+        # Absent [duplicates] block leaves an existing install exactly as it was:
+        # the pipeline off, and the other pipelines still seeing pending rows.
+        duplicates_enabled=duplicates.get("enabled", False),
+        duplicates_mode=duplicates.get("mode", "suggest"),
+        duplicates_window_days=duplicates.get("window_days", 7),
+        duplicates_max_uplift_pct=duplicates.get("max_uplift_pct", 40),
+        duplicates_max_reduction_pct=duplicates.get("max_reduction_pct", 5),
+        duplicates_auth_hold_max_cents=duplicates.get("auth_hold_max_cents", 200),
+        duplicates_threshold=duplicates.get("apply_confidence_threshold", "high"),
+        duplicates_defer_pending=duplicates.get("defer_pending", False),
         email_enabled=email.get("enabled", False),
         email_imap_host=email.get("imap_host", ""),
         email_user=email.get("user", ""),

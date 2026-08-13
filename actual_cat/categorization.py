@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from actual.queries import get_category_groups, get_transactions
 
 from . import history
+from .sync_meta import is_pending
 from .tags import append_tag, has_ai_marker, has_split_marker, slugify_category
 
 if TYPE_CHECKING:
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
     from .llm import LLMClient
 
 
-def find_uncategorized(session: Any) -> list[Any]:
+def find_uncategorized(session: Any, defer_pending: bool = False) -> list[Any]:
     """Transactions needing categorization after the rule engine has run.
 
     Spike-confirmed field names:
@@ -21,6 +22,14 @@ def find_uncategorized(session: Any) -> list[Any]:
       transferred_id  — already-paired transfers skipped
       category        — category ID (None when uncategorized)
       tombstone       — int 0/1
+
+    With defer_pending, rows the bank hasn't finalized are skipped entirely. All
+    three of the rule-engine loop, transfer detection, and categorization go
+    through here, so this one filter keeps every pipeline off a row that may yet
+    turn out to be a duplicate of its own posted counterpart — a pending row
+    paired as a transfer leaves its partner pointing at a tombstone once the
+    duplicate is deleted. The cost is that pending charges stay uncategorized
+    until they clear.
     """
     return [
         t for t in get_transactions(session)
@@ -32,6 +41,7 @@ def find_uncategorized(session: Any) -> list[Any]:
         and not has_split_marker(t.notes)
         and t.account is not None
         and not t.account.offbudget
+        and not (defer_pending and is_pending(t))
     ]
 
 
@@ -85,7 +95,7 @@ def process_categorization(
     schema_text: str,
     prompts: Any,
 ) -> None:
-    txns = find_uncategorized(actual.session)
+    txns = find_uncategorized(actual.session, cfg.duplicates_defer_pending)
 
     if cfg.history_enabled:
         path_map = history.build_category_path_map(actual.session)

@@ -26,9 +26,13 @@ def make_txn(
     account_name="Checking",
     offbudget=False,
     payee_name="Whole Foods",
+    pending=False,
 ) -> MagicMock:
     txn = MagicMock()
     txn.id = id
+    # Bank-sync fields the defer_pending filter reads.
+    txn.cleared = 0 if pending else 1
+    txn.raw_synced_data = '{"booked": false}' if pending else None
     txn.category_id = category_id
     txn.is_parent = is_parent
     txn.transferred_id = transferred_id
@@ -53,6 +57,7 @@ def make_cfg(mode="suggest", threshold="high", history_enabled=False) -> MagicMo
     cfg.history_enabled = history_enabled
     cfg.history_payee_top_n = 3
     cfg.history_min_count = 1
+    cfg.duplicates_defer_pending = False
     return cfg
 
 
@@ -92,6 +97,26 @@ class TestFindUncategorized:
         with patch("actual_cat.categorization.get_transactions", return_value=[txn]):
             result = find_uncategorized(MagicMock())
         assert result == []
+
+    def test_includes_pending_by_default(self):
+        txn = make_txn(pending=True)
+        with patch("actual_cat.categorization.get_transactions", return_value=[txn]):
+            result = find_uncategorized(MagicMock())
+        assert result == [txn]
+
+    def test_excludes_pending_when_deferred(self):
+        # A pending row may yet turn out to be a duplicate of its own posted
+        # counterpart; categorizing it spends a call on a row headed for the bin.
+        txn = make_txn(pending=True)
+        with patch("actual_cat.categorization.get_transactions", return_value=[txn]):
+            result = find_uncategorized(MagicMock(), defer_pending=True)
+        assert result == []
+
+    def test_deferring_keeps_booked_rows(self):
+        txn = make_txn()
+        with patch("actual_cat.categorization.get_transactions", return_value=[txn]):
+            result = find_uncategorized(MagicMock(), defer_pending=True)
+        assert result == [txn]
 
     def test_excludes_ai_marker(self):
         txn = make_txn(notes="#ai:groceries-food")

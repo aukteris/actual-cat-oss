@@ -83,3 +83,26 @@ class TestRenderTransferPrompt:
         text = render_transfer_prompt(txn_a, txn_b)
         assert "My Bank" in text
         assert "(none)" in text
+
+
+class TestDuplicateSystemPrompt:
+    """The two things the prompt exists to teach, learned from live runs."""
+
+    def test_names_both_expected_false_positives(self):
+        from actual_cat.prompts import DUPLICATE_SYSTEM
+
+        assert "subscription" in DUPLICATE_SYSTEM
+        assert "second visit" in DUPLICATE_SYSTEM.lower()
+
+    def test_explains_that_a_posted_row_may_be_dated_a_day_earlier(self):
+        # Without this, the model rejects true pairs on date order alone —
+        # observed on a live DevBudget run before the guidance was added.
+        from actual_cat.prompts import DUPLICATE_SYSTEM
+
+        assert "earlier" in DUPLICATE_SYSTEM
+        assert "authorization date" in DUPLICATE_SYSTEM
+
+    def test_states_that_the_apply_action_is_deletion(self):
+        from actual_cat.prompts import DUPLICATE_SYSTEM
+
+        assert "deleting the pending row" in DUPLICATE_SYSTEM

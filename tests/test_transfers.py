@@ -16,9 +16,13 @@ def make_txn(
     offbudget=False,
     category_id=None,
     is_parent=0,
+    pending=False,
 ) -> MagicMock:
     txn = MagicMock()
     txn.id = id
+    # Bank-sync fields the defer_pending filter reads.
+    txn.cleared = 0 if pending else 1
+    txn.raw_synced_data = '{"booked": false}' if pending else None
     txn.amount = amount
     txn.acct = acct
     txn.date = date
@@ -73,6 +77,35 @@ class TestPairAsTransfer:
         assert b.category_id is None
 
 
+class TestFindTransferCandidates:
+    def _run(self, candidates, defer_pending=False):
+        from actual_cat.transfers import find_transfer_candidates
+
+        session = MagicMock()
+        chain = MagicMock()
+        chain.filter.return_value = chain
+        chain.all.return_value = candidates
+        session.query.return_value = chain
+
+        txn = make_txn(id="a", amount=-50000, acct="checking")
+        txn.get_date.return_value = __import__("datetime").date(2026, 6, 1)
+        return find_transfer_candidates(session, txn, 3, defer_pending)
+
+    def test_pending_partner_matched_by_default(self):
+        partner = make_txn(id="b", amount=50000, acct="savings", pending=True)
+        assert self._run([partner]) == [partner]
+
+    def test_pending_partner_excluded_when_deferred(self):
+        # Pairing a pending leg leaves its partner pointing at a tombstone once
+        # the duplicate is deleted — a failure already seen in the wild.
+        partner = make_txn(id="b", amount=50000, acct="savings", pending=True)
+        assert self._run([partner], defer_pending=True) == []
+
+    def test_booked_partner_kept_when_deferred(self):
+        partner = make_txn(id="b", amount=50000, acct="savings")
+        assert self._run([partner], defer_pending=True) == [partner]
+
+
 class TestProcessTransfers:
     def _run(self, txns, llm_responses, mode="suggest", threshold="high"):
         import actual_cat.prompts as prompts
@@ -83,6 +116,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = mode
         cfg.transfer_threshold = threshold
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
         actual.session = MagicMock()
 
@@ -113,6 +147,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = "suggest"
         cfg.transfer_threshold = "high"
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
 
         with (
@@ -137,6 +172,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = "apply"
         cfg.transfer_threshold = "high"
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
 
         with (
@@ -165,6 +201,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = "suggest"
         cfg.transfer_threshold = "high"
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
 
         with (
@@ -192,6 +229,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = "apply"
         cfg.transfer_threshold = "high"
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
 
         with (
@@ -217,6 +255,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = "suggest"
         cfg.transfer_threshold = "high"
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
 
         with (
@@ -243,6 +282,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = "suggest"
         cfg.transfer_threshold = "high"
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
 
         with (
@@ -265,6 +305,7 @@ class TestProcessTransfers:
         cfg.transfer_mode = "suggest"
         cfg.transfer_threshold = "high"
         cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
         actual = MagicMock()
 
         with (

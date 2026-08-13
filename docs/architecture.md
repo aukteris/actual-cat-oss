@@ -16,6 +16,8 @@ residuals:
 1. **Categorizes transactions from new/unknown payees** the rule engine couldn't handle.
 2. **Detects transfers between accounts** that weren't paired by rules.
 3. **Splits receipts** matched to a bank transaction by exact amount.
+4. **Resolves pending duplicates** — the pending row left behind when its posted
+   counterpart imports separately (off by default; see `actual_cat/duplicates.py`).
 
 Output is either written to transaction notes as suggestions (the safe default)
 or applied directly to the category field after a validation period. The worker is
@@ -60,6 +62,11 @@ Periodic trigger
   ├── 1. Run Actual's rule engine on uncategorized transactions
   │      (handles same-payee cases; no LLM involvement)
   │
+  ├── 1.5. Pending-duplicate resolution (off by default)
+  │      - Cluster pending rows by account + descriptor, match against booked rows
+  │      - LLM adjudicates each candidate; ambiguous sets are held, never guessed
+  │      - Delete the pending row (apply mode) or tag it for review
+  │
   ├── 2. Transfer detection pipeline
   │      - Find inverse-amount pairs across accounts within window
   │      - LLM evaluates each candidate pair
@@ -80,6 +87,9 @@ Periodic trigger
 Transfer detection runs before categorization so a transfer pair never gets
 miscategorized as an expense. Receipt splitting runs before categorization and is
 the one intentional exception to "don't touch already-categorized transactions."
+Duplicate resolution runs before everything because its apply action is deletion:
+going first means no other pipeline has spent a call on, tagged, paired, or split
+a row that is about to be removed.
 
 ## Architectural decisions
 
@@ -96,7 +106,8 @@ the one intentional exception to "don't touch already-categorized transactions."
   pipeline starts in `suggest` for a validation period (~2 weeks), then advances to
   `apply` independently based on observed agreement rates.
 - **Idempotency via marker tags in notes.** The worker prepends markers (`#ai:<slug>`,
-  `#ai-assisted`, `#ai-suggested-transfer`, `#ai-receipt-split` / `#ai-suggested-split`)
+  `#ai-assisted`, `#ai-suggested-transfer`, `#ai-receipt-split` / `#ai-suggested-split`,
+  `#ai-suggested-duplicate` / `#ai-duplicate-review`)
   to transaction notes and skips any transaction already bearing one. Re-running is
   always safe; original notes are preserved.
 - **Dynamic schema from Actual at runtime, not static in code.** The worker fetches
@@ -226,8 +237,18 @@ month. Switch `transfers.mode = "apply"`. Continue monitoring; the bar is higher
 because mis-pairs are destructive. Passes when override rate stays low and no
 false-positive transfer pairs land.
 
+**Stage 4 — Duplicate apply mode.** The strictest gate, because deletion is not
+reversible from the worker's side — undoing a tombstone is manual. Before enabling
+the pipeline at all, replay `scripts/backtest_duplicates.py` over the budget's
+history until recall and spurious-match rate are satisfactory; that costs nothing
+and needs no live run. Then run suggest mode with `defer_pending` on and review
+`#ai-suggested-duplicate` tags against what you would have deleted yourself.
+Advance to `apply` only after a stretch of suggest mode with **no** false positives
+at all — unlike a wrong category, a wrong deletion is silent.
+
 Different thresholds reflect different blast radii: a wrong category is annoying; a
-wrong transfer pairing corrupts spending data on both sides.
+wrong transfer pairing corrupts spending data on both sides; a wrong deletion
+removes a real transaction without saying so.
 
 ## Risks and mitigations
 
@@ -243,6 +264,11 @@ wrong transfer pairing corrupts spending data on both sides.
 - **False-positive transfer pairings** — the worst failure mode. Mitigations: high
   confidence threshold for apply mode, a transfer-specific validation period, and
   enabling transfer apply mode only after categorization apply mode is stable.
+- **Wrongly deleting a real transaction.** Bounded structurally rather than by
+  confidence alone: only a row passing `is_pending()` — imported pending *and* not
+  cleared since — can ever be a deletion target, which is a handful of rows at any
+  moment, and the pipeline refuses outright on split parents, reconciled rows, and
+  transfer legs. Ambiguity is held, not ranked.
 - **LLM unreachable.** The client returns an error result rather than raising; the
   pipelines log and skip individual failures, completing the run partially rather
   than crashing.
