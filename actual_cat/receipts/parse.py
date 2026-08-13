@@ -8,12 +8,162 @@ image-specific — it operates on the already-parsed structure.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+
+import pycountry
+import pyap
+import phonenumbers
+from phonenumbers import PhoneNumberMatcher
+from dateutil import parser as date_parser
 
 # Rounding-only tolerance: diffs within this many cents are nudged onto the
 # largest item and scored as high confidence. Larger diffs signal missing/wrong
 # items and are left untouched (low confidence).
 TOLERANCE_CENTS = 3
+
+# Date format conventions by country code. Extend both this and infer_country_code
+# together as new countries are added.
+_DATE_FORMAT_BY_COUNTRY = {
+    # North America
+    "US": "MDY",
+    "CA": "MDY",
+    "MX": "DMY",
+    # Europe (major countries)
+    "GB": "DMY",
+    "IE": "DMY",
+    "FR": "DMY",
+    "DE": "DMY",
+    "ES": "DMY",
+    "IT": "DMY",
+    "NL": "DMY",
+    "BE": "DMY",
+    "AT": "DMY",
+    "CH": "DMY",
+    "PT": "DMY",
+    "PL": "DMY",
+    "SE": "DMY",
+    "NO": "DMY",
+    "DK": "DMY",
+    "FI": "DMY",
+    # Oceania
+    "AU": "DMY",
+    "NZ": "DMY",
+    # Asia
+    "JP": "YMD",
+}
+
+
+def infer_country_code(location_raw: str | None) -> str | None:
+    """Infer a country's ISO-3166 alpha-2 code from raw location text.
+
+    Tries methods in order of reliability:
+    1. Phone number region detection (most reliable when present)
+    2. pyap address parsing (structured address patterns)
+    3. Country name substring match (fallback, least reliable)
+
+    Returns None if no country can be confidently identified.
+    """
+    if not location_raw:
+        return None
+
+    # Method 1: Phone number detection (most reliable)
+    try:
+        for match in PhoneNumberMatcher(location_raw, "US"):
+            raw = match.raw_string.strip()
+            if raw.startswith("+") or raw.startswith("00"):
+                region = phonenumbers.region_code_for_number(match.number)
+                if region and region != "ZZ":
+                    return region
+    except Exception:
+        pass
+
+    # Method 2: pyap address parsing (try major countries)
+    for country in ["US", "CA", "GB", "IE", "AU", "NZ", "DE", "FR", "MX", "JP"]:
+        try:
+            if pyap.parse(location_raw, country=country):
+                return country
+        except Exception:
+            continue
+
+    # Method 3: Country name substring match
+    lower = location_raw.lower()
+    for country in pycountry.countries:
+        names = {
+            country.name.lower(),
+            getattr(country, "common_name", "").lower(),
+            getattr(country, "official_name", "").lower(),
+        }
+        if any(name and name in lower for name in names):
+            return country.alpha_2
+
+    return None
+
+
+def resolve_receipt_date(
+    date_raw: str | None, location_raw: str | None, received_ts: str
+) -> tuple[str | None, bool]:
+    """Resolve a raw printed date to ISO format.
+
+    Primary signal: vendor location -> country -> date format convention.
+    Falls back to dual-parse (dayfirst=True/False) + received_ts-nearest
+    tiebreak when location wasn't reliably extracted.
+
+    Cross-checks the location-derived date against the received_ts-nearest
+    parse — disagreement signals one extraction is probably wrong, so we
+    return None (triggering the received_ts fallback in match.py) rather
+    than silently trusting either.
+
+    Returns (iso_date_or_None, was_ambiguous).
+    """
+    if not date_raw:
+        return None, False
+
+    anchor = datetime.fromisoformat(received_ts).date()
+
+    # Get the received_ts-nearest interpretation (fallback path)
+    dual_candidates: list[Any] = []
+    for dayfirst in (False, True):
+        try:
+            parsed = date_parser.parse(date_raw, dayfirst=dayfirst, fuzzy=True).date()
+            # Filter out obviously invalid dates (far future or far past)
+            if abs((parsed - anchor).days) <= 365:
+                dual_candidates.append(parsed)
+        except (ValueError, OverflowError):
+            pass
+    dual_candidates = list(dict.fromkeys(dual_candidates))  # preserve order, remove dups
+    dual_best = min(dual_candidates, key=lambda d: abs((d - anchor).days)) if dual_candidates else None
+
+    # Try location-derived format as primary signal
+    country = infer_country_code(location_raw) if location_raw else None
+    convention = _DATE_FORMAT_BY_COUNTRY.get(country) if country else None
+
+    located: Any = None
+    if convention is not None:
+        try:
+            located = date_parser.parse(
+                date_raw,
+                dayfirst=(convention == "DMY"),
+                yearfirst=(convention == "YMD"),
+                fuzzy=True,
+            ).date()
+            # Filter out obviously invalid dates
+            if abs((located - anchor).days) > 365:
+                located = None
+        except (ValueError, OverflowError):
+            located = None
+
+    # Cross-check: if both signals exist and disagree, treat as ambiguous
+    if located is not None and dual_best is not None and located != dual_best:
+        # Disagreement — fall back to None to trigger received_ts handling
+        return None, True
+
+    # Return the location-derived date if available, otherwise the fallback
+    if located is not None:
+        return located.isoformat(), False
+    if dual_best is not None:
+        return dual_best.isoformat(), False
+    return None, False
 
 
 def compute_confidence(items: list[dict[str, Any]], total_cents: int) -> tuple[str, int]:
@@ -84,7 +234,9 @@ def validate_receipt(data: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "merchant": merchant.strip(),
-        "date": data.get("date"),
+        "date": data.get("date"),  # kept for back-compat; prefer date_raw
+        "date_raw": data.get("date_raw"),
+        "location_raw": data.get("location_raw"),
         "total_cents": total_cents,
         "line_items": items,
         "confidence": confidence,

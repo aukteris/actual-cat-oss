@@ -66,6 +66,9 @@ def main() -> None:
     y = margin
     d.text((margin, y), "COSTCO WHOLESALE", font=big, fill="black")
     y += line_h + 12
+    # Add a date that would be ambiguous: 08/09/2026 (Aug 9 in US, Sept 8 in EU)
+    d.text((margin, y), "Date: 08/09/2026", font=body, fill="black")
+    y += line_h
     for ln in ("Warehouse #000", "123 Example St", "Anytown, ST 00000",
                "Member 000000000000", "-" * 34):
         d.text((margin, y), ln, font=body, fill="black")

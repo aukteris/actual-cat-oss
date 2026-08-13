@@ -15,6 +15,7 @@ from .receipts.categorize import categorize_line_items
 from .receipts.extract import extract_receipt
 from .receipts.ingest import poll_email
 from .receipts.match import process_receipt_splits
+from .receipts.parse import resolve_receipt_date
 from .schema import build_schema_text
 from .transfers import process_transfers
 
@@ -88,6 +89,21 @@ def main() -> None:
                             audit._write({"event": "receipt_ocr_failed", "pipeline": "receipt",
                                           "receipt_id": receipt_id, "error": result["error"]})
                         else:
+                            # Resolve the raw date using location-derived format + received_ts cross-check
+                            iso_date, was_ambiguous = resolve_receipt_date(
+                                result.get("date_raw"),
+                                result.get("location_raw"),
+                                inbox_meta["received_ts"],
+                            )
+                            result["date"] = iso_date
+                            if was_ambiguous:
+                                audit._write({
+                                    "event": "receipt_date_ambiguous",
+                                    "pipeline": "receipt",
+                                    "receipt_id": receipt_id,
+                                    "resolved_date": iso_date,
+                                    "location_raw": result.get("location_raw"),
+                                })
                             result = categorize_line_items(
                                 result, llm, prompts, schema_text, item_history, cfg
                             )

@@ -88,7 +88,8 @@ Extract every purchased line item from the receipt. Return JSON with:
 
 {
   "merchant": "Store Name",
-  "date": "YYYY-MM-DD",
+  "date_raw": "08/09/2026",
+  "location_raw": "1900 SE Kirkland Way, Vancouver, WA 98683",
   "total_cents": 4217,
   "line_items": [
     {"description": "ITEM NAME", "amount_cents": 1234},
@@ -113,6 +114,17 @@ categorizes each item.
   "Bottom of Basket", "BOB Count N" — these are store housekeeping, not items.
 - Tax lines — allocate tax proportionally across items; do not emit a Tax entry.
 - Payment, subtotal, and total lines.
+
+### Date and Location Extraction
+- **Purchase date**: Transcribe the date **exactly as printed** on the receipt
+  (e.g. "08/09/2026", "9 Aug 2026", "2026-08-09"), or null if not legible.
+  Do **not** reformat, reorder, or interpret the date — just transcribe the
+  characters as shown. The field name is `date_raw` (not `date`).
+- **Vendor location**: Transcribe the vendor's address information exactly as
+  printed — this may include street address, city, state/region, postal code,
+  country name, and phone number. Include whatever is visible in the receipt
+  header or footer. Do not infer or guess a country. Use `location_raw` as the
+  field name. Null if none is legible.
 
 ### Descriptions
 Produce a human-readable product name — strip internal store codes that a customer

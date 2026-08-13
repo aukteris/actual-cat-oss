@@ -25,6 +25,10 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+# Set SSL CA bundle before importing actualpy
+os.environ["REQUESTS_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
+os.environ["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt"
+
 from actual import Actual
 from actual.queries import create_transaction, get_accounts, get_category_groups
 from dotenv import load_dotenv
@@ -52,16 +56,12 @@ parser.add_argument("--store-path", default="receipts",
                     help="Receipt store path (default: receipts)")
 args = parser.parse_args()
 
-BASE_URL = os.environ.get("ACTUAL_BASE_URL", "https://actual.example.com")
+BASE_URL = os.environ.get("ACTUAL_BASE_URL", "https://finance.dankurtz.local")
 BUDGET_FILE = "DevBudget"
-CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 
 password = os.environ.get("ACTUAL_PASSWORD")
 if not password:
     sys.exit("ACTUAL_PASSWORD not set")
-
-os.environ["REQUESTS_CA_BUNDLE"] = CA_BUNDLE
-os.environ["SSL_CERT_FILE"] = CA_BUNDLE
 
 TODAY = date.today()
 # Optional suffix so a fresh batch can be seeded for re-testing without colliding

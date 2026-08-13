@@ -11,6 +11,10 @@ dependencies = [
     "python-multipart>=0.0.12",
     "uvicorn[standard]>=0.29.0",
     "pillow>=10.0",
+    "phonenumbers>=8.13.0",
+    "pyap>=0.3.0",
+    "pycountry>=23.0",
+    "python-dateutil>=2.8.0",
 ]
 
 [project.optional-dependencies]

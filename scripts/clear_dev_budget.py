@@ -12,15 +12,18 @@ Run:
 import os
 import sys
 
+# Set SSL CA bundle BEFORE any imports that might use httpx/requests
+os.environ["REQUESTS_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
+os.environ["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt"
+
 from actual import Actual
 from actual.database import Transactions
 from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = os.environ.get("ACTUAL_BASE_URL", "https://actual.example.com")
+BASE_URL = os.environ.get("ACTUAL_BASE_URL", "https://finance.dankurtz.local")
 BUDGET_FILE = "DevBudget"
-CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 
 password = os.environ.get("ACTUAL_PASSWORD")
 if not password:
@@ -28,9 +31,6 @@ if not password:
 
 if BUDGET_FILE != "DevBudget":
     sys.exit("Refusing to clear a non-Dev budget")
-
-os.environ["REQUESTS_CA_BUNDLE"] = CA_BUNDLE
-os.environ["SSL_CERT_FILE"] = CA_BUNDLE
 
 with Actual(base_url=BASE_URL, password=password, file=BUDGET_FILE) as actual:
     rows = (
