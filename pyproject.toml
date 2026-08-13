@@ -24,6 +24,7 @@ dev = [
     "pytest-mock",
     "ruff",
     "mypy",
+    "types-python-dateutil",
 ]
 
 [build-system]
@@ -49,7 +50,8 @@ markers = [
 python_version = "3.11"
 strict = true
 
-# The `actual` library ships no py.typed marker / stubs; don't flag its imports.
+# Neither `actual` nor `pyap` ships a py.typed marker or stubs; don't flag their
+# imports. (dateutil has stubs — they're in the dev extra as types-python-dateutil.)
 [[tool.mypy.overrides]]
-module = ["actual", "actual.*"]
+module = ["actual", "actual.*", "pyap", "pyap.*"]
 ignore_missing_imports = true

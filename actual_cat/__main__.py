@@ -98,7 +98,8 @@ def main() -> None:
                             audit._write({"event": "receipt_ocr_failed", "pipeline": "receipt",
                                           "receipt_id": receipt_id, "error": result["error"]})
                         else:
-                            # Resolve the raw date using location-derived format + received_ts cross-check
+                            # Resolve the raw date using location-derived format
+                            # + received_ts cross-check
                             iso_date, was_ambiguous = resolve_receipt_date(
                                 result.get("date_raw"),
                                 result.get("location_raw"),
