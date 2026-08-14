@@ -399,3 +399,80 @@ def test_load_config_defer_pending_without_enabling_the_pipeline(
     cfg = load_config(str(p))
     assert cfg.duplicates_enabled is False
     assert cfg.duplicates_defer_pending is True
+
+
+# ---------------------------------------------------------------------------
+# [bank_sync] / [state] — scheduled bank sync
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_bank_sync_absent_block_is_inert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing install with no [bank_sync] block keeps its old behavior:
+    sync stays entirely with actual-server's own schedule."""
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    toml_path = _make_toml(tmp_path, _LLM_BLOCK)
+    cfg = load_config(str(toml_path))
+    assert cfg.bank_sync_enabled is False
+    assert cfg.bank_sync_interval_minutes == 360
+    assert cfg.bank_sync_grace_minutes == 5
+    assert cfg.bank_sync_max_runs_per_day == 0
+    assert cfg.bank_sync_accounts == []
+    assert cfg.bank_sync_exclude_accounts == []
+    assert cfg.bank_sync_lookback_days == 0
+    assert cfg.bank_sync_allow_first_sync is False
+    assert cfg.state_path == "state/actual-cat.json"
+
+
+def test_load_config_bank_sync_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    p = tmp_path / "config.toml"
+    p.write_text(
+        _MINIMAL_TOML_TEMPLATE.format(llm_block=_LLM_BLOCK)
+        + textwrap.dedent("""
+            [bank_sync]
+            enabled = true
+            interval_minutes = 720
+            grace_minutes = 10
+            max_runs_per_day = 4
+            accounts = ["Checking"]
+            exclude_accounts = ["Savings"]
+            lookback_days = 14
+            allow_first_sync = true
+
+            [state]
+            path = "custom/state.json"
+        """)
+    )
+    cfg = load_config(str(p))
+    assert cfg.bank_sync_enabled is True
+    assert cfg.bank_sync_interval_minutes == 720
+    assert cfg.bank_sync_grace_minutes == 10
+    assert cfg.bank_sync_max_runs_per_day == 4
+    assert cfg.bank_sync_accounts == ["Checking"]
+    assert cfg.bank_sync_exclude_accounts == ["Savings"]
+    assert cfg.bank_sync_lookback_days == 14
+    assert cfg.bank_sync_allow_first_sync is True
+    assert cfg.state_path == "custom/state.json"
+
+
+def test_load_config_state_path_independent_of_bank_sync_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[state] stands on its own, same as defer_pending does for [duplicates] —
+    other future pipelines can reuse the state file without bank_sync being on."""
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    p = tmp_path / "config.toml"
+    p.write_text(
+        _MINIMAL_TOML_TEMPLATE.format(llm_block=_LLM_BLOCK)
+        + textwrap.dedent("""
+            [state]
+            path = "custom/state.json"
+        """)
+    )
+    cfg = load_config(str(p))
+    assert cfg.bank_sync_enabled is False
+    assert cfg.state_path == "custom/state.json"

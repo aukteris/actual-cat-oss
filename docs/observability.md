@@ -25,6 +25,28 @@ Logstash, which parses each by `log_type` and forwards to a shared
 Both dashboards aggregate via **runtime keyword fields** on a dedicated data view
 (see Step 4 for why).
 
+## Bank-sync audit events
+
+`bank_sync.py` writes four event types into the same `actual-cat.jsonl` stream as
+every other pipeline decision, so they need no new Filebeat input or Logstash
+filter — they arrive through the existing `actualcat-audit` path and land under
+the `actualcat.*` namespace.
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `bank_sync_ok` | `accounts_synced`, `imported_count`, `per_account` | A completed sync pass (possibly zero accounts if none were due) |
+| `bank_sync_skipped` | `reason`: `disabled` \| `interval` \| `daily_cap` | The gate blocked the run before touching any account |
+| `bank_sync_account_failed` | `account`, `error_type`, `status`, `reason` | One account's `run_bank_sync()` raised `ActualBankSyncError`; other accounts still ran |
+| `bank_sync_failed` | `error` | The whole stage raised outside the per-account loop (e.g. a network-level failure) |
+
+**`bank_sync_account_failed` is the one worth a Kibana alert.** Expired bank
+credentials are the normal failure shape here, they're persistent (every
+subsequent run fails the same way until someone re-links the account), and
+without an alert the only symptom is "transactions stopped appearing" — usually
+noticed a week later. Once this stream is flowing, add a Kibana alert rule (or a
+panel on the Categorization Monitoring dashboard) on
+`actualcat.event:bank_sync_account_failed` count > 0 over a rolling window.
+
 ## Architecture
 
 ```

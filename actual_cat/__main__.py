@@ -7,6 +7,7 @@ from actual.queries import get_ruleset
 
 from . import history, prompts
 from .audit import AuditLogger
+from .bank_sync import process_bank_sync
 from .categorization import find_uncategorized, process_categorization
 from .config import load_config
 from .duplicates import process_duplicates
@@ -18,6 +19,7 @@ from .receipts.ingest import poll_email
 from .receipts.match import process_receipt_splits
 from .receipts.parse import resolve_receipt_date
 from .schema import build_schema_text
+from .state import SyncState
 from .transfers import process_transfers
 
 
@@ -35,6 +37,7 @@ def main() -> None:
         max_retries=cfg.llm_max_retries,
     )
     audit = AuditLogger(cfg.audit_log_path)
+    state = SyncState(cfg.state_path)
 
     kwargs: dict[str, Any] = dict(
         base_url=cfg.base_url,
@@ -46,6 +49,23 @@ def main() -> None:
 
     try:
         with Actual(**kwargs) as actual:
+            # 0. Scheduled bank sync — before the rule engine, so freshly imported
+            #    rows are processed in this same run instead of waiting a full tick.
+            #    process_bank_sync() re-checks cfg.bank_sync_enabled itself; the
+            #    if/else here just keeps the skip-audit shape consistent with the
+            #    other optional pipelines below.
+            try:
+                if cfg.bank_sync_enabled:
+                    process_bank_sync(actual, audit, cfg, state)
+                    actual.commit()
+                else:
+                    audit.log_skipped_pipeline("bank_sync")
+            except Exception as e:
+                print(f"WARNING: bank sync failed ({e})", file=sys.stderr)
+                audit._write({
+                    "event": "bank_sync_failed", "pipeline": "bank_sync", "error": str(e)
+                })
+
             # 1. Run Actual's built-in rule engine first.
             # Guard against malformed rules (e.g. empty category ID) failing
             # pydantic validation — the server runs rules on sync anyway.
