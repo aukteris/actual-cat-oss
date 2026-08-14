@@ -12,19 +12,29 @@ AI-assisted transaction categorization worker for [Actual Budget](https://actual
    OCR'd by the vision LLM, matched to the corresponding bank transaction by exact
    amount, and the transaction is either tagged for review (suggest) or split into
    categorized child rows (apply).
+4. **Pending-duplicate resolution** — when a card authorization and its posted
+   counterpart both land in the budget as separate rows (a tip added after
+   authorization defeats the importer's amount match), the pending row is
+   detected and tagged for review, or deleted in apply mode. Off by default.
 
-It runs the built-in rule engine first, then the transfer pipeline, then the
-receipt pipeline, then categorization on whatever remains. By default all LLM
-pipelines run in **suggest mode**: they write tags to transaction notes and never
-touch category fields or create splits until advanced to apply mode.
+It runs the built-in rule engine first, then duplicate resolution, then the
+transfer pipeline, then the receipt pipeline, then categorization on whatever
+remains. By default all LLM pipelines run in **suggest mode**: they write tags to
+transaction notes and never touch category fields, create splits, or delete rows
+until advanced to apply mode.
 
 ## How it works
 
 ```
-rule engine  →  transfer detection  →  receipt splitting  →  categorization
- (Actual's)      (LLM, suggest)        (LLM, suggest)        (LLM, suggest)
+rule engine  →  pending duplicates  →  transfer detection  →  receipt splitting  →  categorization
+ (Actual's)      (LLM, off)             (LLM, suggest)        (LLM, suggest)        (LLM, suggest)
 ```
 
+- Duplicate resolution runs first, before any other pipeline: its apply action is
+  deletion, and going first means nothing has been spent on — or written to — a row
+  that is about to be removed. With `defer_pending`, every other pipeline also skips
+  rows the bank hasn't finalized, so a pending charge is categorized once it clears
+  rather than twice.
 - Transfers run before categorization so a transfer pair never gets miscategorized.
 - Receipt splitting runs before categorization and overrides any existing category —
   this is the one intentional exception to the "don't touch already-categorized
@@ -57,6 +67,7 @@ Each pipeline has an independent `mode` (`suggest` | `apply`), flipped in
 | `suggest` | Writes `#ai:<slug>` tag to notes only. Category field untouched. |
 | `apply` | Sets the category when confidence meets the threshold, tags `#ai-assisted`. Falls back to suggest below threshold. |
 | `apply` (receipts) | Creates child split rows, sets their categories and notes, clears parent category. |
+| `apply` (duplicates) | Deletes the pending row (soft delete, as the Actual UI does). Only ever a row the bank hasn't finalized; never the posted survivor. |
 
 `Uncertain` results are always tagged, never applied.
 
@@ -97,7 +108,8 @@ Re-running is always safe:
 
 - The categorization pipeline only sees transactions where `category_id is None`.
 - Any transaction already bearing an `#ai:`, `#ai-assisted`, `#ai-suggested-transfer`,
-  or `#ai-receipt-split` / `#ai-suggested-split` marker is skipped.
+  `#ai-receipt-split` / `#ai-suggested-split`, or `#ai-suggested-duplicate` /
+  `#ai-duplicate-review` marker is skipped.
 - Off-budget accounts are excluded (they don't use budget categories).
 - Pending receipts that go unmatched for more than `expiry_days` are marked expired
   and skipped on future runs.
@@ -146,6 +158,25 @@ TLS to the Actual server is trusted via `paths.ca_bundle`, which the worker expo
 as `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE`. Leave unset for cloud LLM providers so
 the system trust store validates their public certificates.
 
+**Pending duplicates** (`[duplicates]`): off unless `enabled = true`, and omitting
+the block entirely leaves every other pipeline exactly as it was.
+
+| Key | Meaning |
+|---|---|
+| `mode` | `suggest` tags the pending row; `apply` **deletes** it at or above the threshold |
+| `window_days` | Symmetric search window — a posted row is sometimes dated a day *earlier* |
+| `max_uplift_pct` / `max_reduction_pct` | Tip band: how far the posted amount may sit above or below the pending one |
+| `auth_hold_max_cents` | Ceiling for treating a small pending row as an authorization probe |
+| `defer_pending` | Independent of the matcher: the other pipelines skip rows the bank hasn't finalized |
+
+Before enabling it, replay the matcher over the budget's own history — hand-deleted
+pending rows are ground truth for what it should propose, never-pending rows for
+what it should not:
+
+```bash
+ACTUAL_PASSWORD=... venv/bin/python scripts/backtest_duplicates.py   # read-only
+```
+
 ## Install & run
 
 ```bash
@@ -188,11 +219,13 @@ actual_cat/
 ├── __main__.py        # orchestration
 ├── config.py          # TOML + .env loading (LLMProfile, Config)
 ├── llm.py             # OpenAI-compatible client — LLMProfile + LLMClient
-├── prompts.py         # system prompts: categorization, transfer, receipt extraction/categorization
+├── prompts.py         # system prompts: categorization, transfer, duplicate, receipt extraction/categorization
 ├── schema.py          # renders the live category schema for the LLM
 ├── categorization.py  # find_uncategorized + categorization pipeline
 ├── history.py         # payee + item-description history from the live budget
 ├── transfers.py       # transfer candidate finder + pairing
+├── duplicates.py      # pending-duplicate clustering, rules R1-R5, adjudication, deletion
+├── sync_meta.py       # raw_synced_data parsing: is_pending, bank id, descriptor tokens
 ├── tags.py            # tag markers, slugify, idempotent prepend
 ├── audit.py           # JSONL audit logger
 └── receipts/

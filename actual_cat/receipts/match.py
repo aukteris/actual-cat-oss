@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
+from ..sync_meta import is_pending
 from ..tags import (
     append_tag,
     has_applied_split_marker,
@@ -25,7 +26,12 @@ def _meets_threshold(confidence: str, threshold: str) -> bool:
     return _CONFIDENCE_RANK.get(confidence, 0) >= _CONFIDENCE_RANK.get(threshold, 2)
 
 
-def find_receipt_match(session: Any, receipt_meta: dict[str, Any], window_days: int) -> list[Any]:
+def find_receipt_match(
+    session: Any,
+    receipt_meta: dict[str, Any],
+    window_days: int,
+    defer_pending: bool = False,
+) -> list[Any]:
     """Find eligible on-budget transactions matching the receipt's exact amount.
 
     Broader than find_uncategorized: receipt overrides prior categorization,
@@ -36,6 +42,11 @@ def find_receipt_match(session: Any, receipt_meta: dict[str, Any], window_days: 
     higher-confidence receipt submission can finalize the split (hybrid retry).
 
     Off-budget accounts excluded (consistent with all other pipelines).
+
+    With defer_pending, rows the bank hasn't finalized are excluded: splitting
+    against a pending authorization computes the split from the pre-tip total,
+    which is exactly the discrepancy that produces the duplicate in the first
+    place. The receipt stays pending and matches the posted row instead.
     """
     from actual.database import Transactions
     from actual.utils.conversions import date_to_int
@@ -89,6 +100,7 @@ def find_receipt_match(session: Any, receipt_meta: dict[str, Any], window_days: 
         # Only exclude applied splits (#ai-receipt-split); suggested splits
         # (#ai-suggested-split) remain eligible for a retry submission.
         and not has_applied_split_marker(t.notes)
+        and not (defer_pending and is_pending(t))
         # Also exclude the broad split marker for categorization pipeline
         # compatibility — but NOT for the receipt matcher. The receipt matcher
         # only cares about applied splits. However, has_split_marker also
@@ -150,7 +162,9 @@ def process_receipt_splits(
             })
             continue
 
-        candidates = find_receipt_match(actual.session, receipt_meta, window_days)
+        candidates = find_receipt_match(
+            actual.session, receipt_meta, window_days, cfg.duplicates_defer_pending
+        )
 
         if len(candidates) == 0:
             # Still waiting for the bank transaction to post — leave as pending

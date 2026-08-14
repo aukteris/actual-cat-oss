@@ -11,11 +11,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-import pycountry
-import pyap
 import phonenumbers
-from phonenumbers import PhoneNumberMatcher
+import pyap
+import pycountry
 from dateutil import parser as date_parser
+from phonenumbers import PhoneNumberMatcher
 
 # Rounding-only tolerance: diffs within this many cents are nudged onto the
 # largest item and scored as high confidence. Larger diffs signal missing/wrong
@@ -88,14 +88,14 @@ def infer_country_code(location_raw: str | None) -> str | None:
 
     # Method 3: Country name substring match
     lower = location_raw.lower()
-    for country in pycountry.countries:
+    for entry in pycountry.countries:
         names = {
-            country.name.lower(),
-            getattr(country, "common_name", "").lower(),
-            getattr(country, "official_name", "").lower(),
+            entry.name.lower(),
+            getattr(entry, "common_name", "").lower(),
+            getattr(entry, "official_name", "").lower(),
         }
         if any(name and name in lower for name in names):
-            return country.alpha_2
+            return str(entry.alpha_2)
 
     return None
 
@@ -132,7 +132,9 @@ def resolve_receipt_date(
         except (ValueError, OverflowError):
             pass
     dual_candidates = list(dict.fromkeys(dual_candidates))  # preserve order, remove dups
-    dual_best = min(dual_candidates, key=lambda d: abs((d - anchor).days)) if dual_candidates else None
+    dual_best = (
+        min(dual_candidates, key=lambda d: abs((d - anchor).days)) if dual_candidates else None
+    )
 
     # Try location-derived format as primary signal
     country = infer_country_code(location_raw) if location_raw else None

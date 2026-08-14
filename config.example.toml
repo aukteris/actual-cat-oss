@@ -72,6 +72,19 @@ mode = "suggest"
 window_days = 3
 apply_confidence_threshold = "high"
 
+# Pending-duplicate resolution — removes the pending authorization row left behind
+# when its posted counterpart imports separately (tip added after authorization).
+# Off by default; omitting the whole block leaves every other pipeline unchanged.
+[duplicates]
+enabled = false
+mode = "suggest"                  # "suggest" | "apply" — apply DELETES the pending row
+window_days = 7                   # symmetric: a posted row is sometimes dated earlier
+max_uplift_pct = 40               # posted above pending (tip band ceiling)
+max_reduction_pct = 5             # posted below pending
+auth_hold_max_cents = 200         # ceiling for the $1-ish authorization-probe rule
+apply_confidence_threshold = "high"
+defer_pending = true              # other pipelines ignore rows the bank hasn't finalized
+
 [audit]
 log_path = "logs/actual-cat.jsonl"
 

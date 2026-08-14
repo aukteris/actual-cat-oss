@@ -1,7 +1,8 @@
 import re
 
 AI_MARKER_RE = re.compile(
-    r"#ai(-suggested-transfer|-assisted|-suggested-split|-receipt-split|:\S+)"
+    r"#ai(-suggested-transfer|-assisted|-suggested-split|-receipt-split"
+    r"|-suggested-duplicate|-duplicate-review|:\S+)"
 )
 CATEGORY_TAG_RE = re.compile(r"#ai:\S+")
 
@@ -17,6 +18,7 @@ def slugify_category(category_path: str) -> str:
 
 SPLIT_MARKER_RE = re.compile(r"#ai(-suggested-split|-receipt-split)")
 APPLIED_SPLIT_MARKER_RE = re.compile(r"#ai-receipt-split")
+DUPLICATE_MARKER_RE = re.compile(r"#ai(-suggested-duplicate|-duplicate-review)")
 
 
 def has_ai_marker(notes: str | None) -> bool:
@@ -53,6 +55,18 @@ def has_applied_split_marker(notes: str | None) -> bool:
     if not notes:
         return False
     return bool(APPLIED_SPLIT_MARKER_RE.search(notes))
+
+
+def has_duplicate_marker(notes: str | None) -> bool:
+    """True for a row the duplicate pipeline has already ruled on.
+
+    Covers both #ai-suggested-duplicate (believed to be a duplicate) and
+    #ai-duplicate-review (held or refused). Either way the row is in front of
+    the user already, so re-adjudicating it would just spend a call per run.
+    """
+    if not notes:
+        return False
+    return bool(DUPLICATE_MARKER_RE.search(notes))
 
 
 def remove_tag(notes: str | None, tag: str) -> str:

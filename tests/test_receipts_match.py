@@ -7,9 +7,13 @@ from actual_cat.receipts.match import find_receipt_match, process_receipt_splits
 
 def make_txn(id="txn-1", amount=-1000, acct="acct-checking", date_int=20260601,
              transferred_id=None, tombstone=0, notes=None, is_parent=0,
-             category_id=None, account_name="Checking", offbudget=False):
+             category_id=None, account_name="Checking", offbudget=False,
+             pending=False):
     txn = MagicMock()
     txn.id = id
+    # Bank-sync fields the defer_pending filter reads.
+    txn.cleared = 0 if pending else 1
+    txn.raw_synced_data = '{"booked": false}' if pending else None
     txn.amount = amount
     txn.acct = acct
     txn.date = date_int
@@ -45,7 +49,7 @@ def make_receipt_meta(total_cents=1000, date="2026-06-01", receipt_id="rcpt-1",
 
 
 class TestFindReceiptMatch:
-    def _run(self, candidates, receipt_meta=None):
+    def _run(self, candidates, receipt_meta=None, defer_pending=False):
         if receipt_meta is None:
             receipt_meta = make_receipt_meta()
         session = MagicMock()
@@ -55,7 +59,18 @@ class TestFindReceiptMatch:
         query_chain.all.return_value = candidates
         session.query.return_value = query_chain
 
-        return find_receipt_match(session, receipt_meta, window_days=3)
+        return find_receipt_match(
+            session, receipt_meta, window_days=3, defer_pending=defer_pending
+        )
+
+    def test_pending_txn_matched_by_default(self):
+        txn = make_txn(amount=-1000, pending=True)
+        assert self._run([txn]) == [txn]
+
+    def test_pending_txn_excluded_when_deferred(self):
+        # The split would be computed against the pre-tip authorization total.
+        txn = make_txn(amount=-1000, pending=True)
+        assert self._run([txn], defer_pending=True) == []
 
     def test_zero_total_returns_empty(self):
         meta = make_receipt_meta(total_cents=0)
@@ -111,6 +126,7 @@ class TestProcessReceiptSplits:
         cfg.receipts_store_path = store_path
         cfg.receipts_match_window_days = window_days
         cfg.receipts_expiry_days = expiry_days
+        cfg.duplicates_defer_pending = False
         return cfg
 
     def test_suggest_mode_tags_matched_txn(self, tmp_path):

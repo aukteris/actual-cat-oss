@@ -9,6 +9,7 @@ from . import history, prompts
 from .audit import AuditLogger
 from .categorization import find_uncategorized, process_categorization
 from .config import load_config
+from .duplicates import process_duplicates
 from .llm import LLMClient
 from .receipts import store as receipt_store
 from .receipts.categorize import categorize_line_items
@@ -50,11 +51,19 @@ def main() -> None:
             # pydantic validation — the server runs rules on sync anyway.
             try:
                 ruleset = get_ruleset(actual.session)
-                for txn in find_uncategorized(actual.session):
+                for txn in find_uncategorized(actual.session, cfg.duplicates_defer_pending):
                     ruleset.run(txn)
                 actual.commit()
             except Exception as e:
                 print(f"WARNING: rule engine skipped ({e})", file=sys.stderr)
+
+            # 1.5. Pending-duplicate resolution. Runs before every LLM pipeline so
+            #      nothing is spent on — or written to — a row about to be deleted.
+            if cfg.duplicates_enabled:
+                process_duplicates(actual, llm, audit, cfg, prompts)
+                actual.commit()
+            else:
+                audit.log_skipped_pipeline("duplicates")
 
             # 2. Transfer detection (before categorization so transfers aren't miscategorized)
             process_transfers(actual, llm, audit, cfg, prompts)
@@ -89,7 +98,8 @@ def main() -> None:
                             audit._write({"event": "receipt_ocr_failed", "pipeline": "receipt",
                                           "receipt_id": receipt_id, "error": result["error"]})
                         else:
-                            # Resolve the raw date using location-derived format + received_ts cross-check
+                            # Resolve the raw date using location-derived format
+                            # + received_ts cross-check
                             iso_date, was_ambiguous = resolve_receipt_date(
                                 result.get("date_raw"),
                                 result.get("location_raw"),

@@ -1,17 +1,14 @@
 """Unit tests for receipt parsing, validation, and date resolution."""
 
-from datetime import date, datetime, timezone
 
 import pytest
 
 from actual_cat.receipts.parse import (
-    TOLERANCE_CENTS,
     compute_confidence,
     infer_country_code,
     resolve_receipt_date,
     validate_receipt,
 )
-
 
 # ---------------------------------------------------------------------------
 # compute_confidence
@@ -62,7 +59,8 @@ class TestValidateReceipt:
             "total_cents": 4217,
             "line_items": [
                 {"description": "Groceries", "amount_cents": 3000, "category": "Food / Groceries"},
-                {"description": "Shampoo", "amount_cents": 1217, "category": "Personal / Personal Care"},
+                {"description": "Shampoo", "amount_cents": 1217,
+                 "category": "Personal / Personal Care"},
             ],
         }
         base.update(overrides)
@@ -292,7 +290,9 @@ class TestResolveReceiptDate:
         assert was_ambiguous is False
 
     def test_invalid_date_format_returns_none(self):
-        iso_date, was_ambiguous = resolve_receipt_date("not-a-date", "US location", self._RECEIVED_TS)
+        iso_date, was_ambiguous = resolve_receipt_date(
+            "not-a-date", "US location", self._RECEIVED_TS
+        )
         assert iso_date is None
         assert was_ambiguous is False
 

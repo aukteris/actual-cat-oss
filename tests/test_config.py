@@ -322,3 +322,80 @@ def test_load_config_rate_limit_explicit(
     cfg = load_config(str(toml_path))
     assert cfg.llm_requests_per_minute == 15
     assert cfg.llm_max_retries == 5
+
+
+# ---------------------------------------------------------------------------
+# [duplicates] — pending-duplicate pipeline
+# ---------------------------------------------------------------------------
+
+_LLM_BLOCK = textwrap.dedent("""
+    [llm]
+    endpoint = "http://local/v1"
+    model = "my-model"
+""")
+
+
+def test_load_config_duplicates_absent_block_is_inert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing install with no [duplicates] block keeps its old behavior."""
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    toml_path = _make_toml(tmp_path, _LLM_BLOCK)
+    cfg = load_config(str(toml_path))
+    assert cfg.duplicates_enabled is False
+    # Crucially also off: the other pipelines keep seeing pending rows.
+    assert cfg.duplicates_defer_pending is False
+    assert cfg.duplicates_mode == "suggest"
+    assert cfg.duplicates_window_days == 7
+    assert cfg.duplicates_max_uplift_pct == 40
+    assert cfg.duplicates_max_reduction_pct == 5
+    assert cfg.duplicates_auth_hold_max_cents == 200
+    assert cfg.duplicates_threshold == "high"
+
+
+def test_load_config_duplicates_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    p = tmp_path / "config.toml"
+    p.write_text(
+        _MINIMAL_TOML_TEMPLATE.format(llm_block=_LLM_BLOCK)
+        + textwrap.dedent("""
+            [duplicates]
+            enabled = true
+            mode = "apply"
+            window_days = 5
+            max_uplift_pct = 35
+            max_reduction_pct = 3
+            auth_hold_max_cents = 150
+            apply_confidence_threshold = "medium"
+            defer_pending = true
+        """)
+    )
+    cfg = load_config(str(p))
+    assert cfg.duplicates_enabled is True
+    assert cfg.duplicates_mode == "apply"
+    assert cfg.duplicates_window_days == 5
+    assert cfg.duplicates_max_uplift_pct == 35
+    assert cfg.duplicates_max_reduction_pct == 3
+    assert cfg.duplicates_auth_hold_max_cents == 150
+    assert cfg.duplicates_threshold == "medium"
+    assert cfg.duplicates_defer_pending is True
+
+
+def test_load_config_defer_pending_without_enabling_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """defer_pending stands on its own — it needs no matcher to be useful."""
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    p = tmp_path / "config.toml"
+    p.write_text(
+        _MINIMAL_TOML_TEMPLATE.format(llm_block=_LLM_BLOCK)
+        + textwrap.dedent("""
+            [duplicates]
+            defer_pending = true
+        """)
+    )
+    cfg = load_config(str(p))
+    assert cfg.duplicates_enabled is False
+    assert cfg.duplicates_defer_pending is True
