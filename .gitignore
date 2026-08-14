@@ -8,6 +8,7 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 logs/
+/state/
 /receipts/
 *.egg-info/
 dist/

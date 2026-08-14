@@ -41,6 +41,16 @@ class Config:
     duplicates_auth_hold_max_cents: int
     duplicates_threshold: str
     duplicates_defer_pending: bool   # other pipelines ignore pending rows
+    # scheduled bank sync
+    bank_sync_enabled: bool
+    bank_sync_interval_minutes: int
+    bank_sync_grace_minutes: int     # absorbs systemd RandomizedDelaySec jitter
+    bank_sync_max_runs_per_day: int  # 0 = uncapped
+    bank_sync_accounts: list[str]        # empty = all sync-enabled accounts
+    bank_sync_exclude_accounts: list[str]
+    bank_sync_lookback_days: int     # 0 = actualpy default (per-account last transaction)
+    bank_sync_allow_first_sync: bool # guard the auto "Starting Balance" reconciliation row
+    state_path: str
     # email ingestion
     email_enabled: bool
     email_imap_host: str
@@ -133,6 +143,8 @@ def load_config(path: str = "config.toml") -> Config:
 
     receipts = raw.get("receipts", {})
     duplicates = raw.get("duplicates", {})
+    bank_sync = raw.get("bank_sync", {})
+    state = raw.get("state", {})
     email = raw.get("email", {})
     receiver = raw.get("receiver", {})
     history = raw.get("history", {})
@@ -169,6 +181,17 @@ def load_config(path: str = "config.toml") -> Config:
         duplicates_auth_hold_max_cents=duplicates.get("auth_hold_max_cents", 200),
         duplicates_threshold=duplicates.get("apply_confidence_threshold", "high"),
         duplicates_defer_pending=duplicates.get("defer_pending", False),
+        # Absent [bank_sync] block leaves an existing install exactly as it was:
+        # the pipeline off, sync left entirely to actual-server's own schedule.
+        bank_sync_enabled=bank_sync.get("enabled", False),
+        bank_sync_interval_minutes=bank_sync.get("interval_minutes", 360),
+        bank_sync_grace_minutes=bank_sync.get("grace_minutes", 5),
+        bank_sync_max_runs_per_day=bank_sync.get("max_runs_per_day", 0),
+        bank_sync_accounts=bank_sync.get("accounts", []),
+        bank_sync_exclude_accounts=bank_sync.get("exclude_accounts", []),
+        bank_sync_lookback_days=bank_sync.get("lookback_days", 0),
+        bank_sync_allow_first_sync=bank_sync.get("allow_first_sync", False),
+        state_path=state.get("path", "state/actual-cat.json"),
         email_enabled=email.get("enabled", False),
         email_imap_host=email.get("imap_host", ""),
         email_user=email.get("user", ""),

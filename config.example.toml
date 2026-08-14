@@ -85,6 +85,24 @@ auth_hold_max_cents = 200         # ceiling for the $1-ish authorization-probe r
 apply_confidence_threshold = "high"
 defer_pending = true              # other pipelines ignore rows the bank hasn't finalized
 
+# Scheduled bank sync — the worker pulls fresh transactions itself, before the rule
+# engine, instead of relying solely on actual-server's own sync schedule. Off by
+# default; if actual-server already has its own schedule, leave this off or turn
+# that off first — running both burns the provider's quota twice for no benefit.
+[bank_sync]
+enabled = false
+interval_minutes = 360            # independent of the timer cadence; SimpleFIN/
+                                   # GoCardless refresh a few times a day at most
+grace_minutes = 5                 # absorbs the timer's RandomizedDelaySec jitter
+max_runs_per_day = 0              # 0 = uncapped; set to the provider's per-account quota
+accounts = []                     # empty = all sync-enabled accounts
+exclude_accounts = []
+lookback_days = 0                 # 0 = actualpy default (per-account last transaction date)
+allow_first_sync = false          # guard the auto "Starting Balance" reconciliation row
+
+[state]
+path = "state/actual-cat.json"    # run-state for the bank_sync gate (due/cap tracking)
+
 [audit]
 log_path = "logs/actual-cat.jsonl"
 

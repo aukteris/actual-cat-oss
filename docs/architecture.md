@@ -48,9 +48,13 @@ handle:
 - **Web lookup for unknown merchants.** When the LLM can't identify a merchant from
   training knowledge alone, a web search could provide enrichment. Adds privacy
   considerations (leaking transaction info externally) and infrastructure.
-- **Bank sync triggering.** `actualpy` exposes `run_bank_sync()`, but the worker
-  stays focused on categorizing what's already in the budget. Sync runs through
-  actual-server's own schedule.
+- ~~**Bank sync triggering.**~~ **Superseded — implemented as a gated Stage 0.**
+  `actualpy` exposes `run_bank_sync()`; the worker now owns the sync on its own
+  interval (`[bank_sync]`, off by default) so import lands before the rule engine
+  runs, instead of relying solely on actual-server's own schedule. See
+  `actual_cat/bank_sync.py` and `actual_cat/state.py`. Kept here as a decision
+  record rather than deleted: the original reasoning (rules should supersede AI,
+  not the other way around) still holds for every pipeline downstream of import.
 
 ## Pipeline architecture
 
@@ -58,6 +62,11 @@ The worker runs these pipelines in order per invocation:
 
 ```
 Periodic trigger
+  │
+  ├── 0. Scheduled bank sync (off by default, gated by [bank_sync])
+  │      - Gate: enabled, due (interval - grace since last run), under daily cap
+  │      - Per-account run_bank_sync(), each in its own try/except — one
+  │        account's failure never blocks the rest
   │
   ├── 1. Run Actual's rule engine on uncategorized transactions
   │      (handles same-payee cases; no LLM involvement)
@@ -83,6 +92,13 @@ Periodic trigger
   │
   └── Commit changes back to Actual server + write structured audit log
 ```
+
+Bank sync runs first, when enabled, because everything downstream is defined as
+"process what's in the budget" — importing after the rule engine would leave
+freshly synced rows waiting a full tick. It has its own interval independent of
+the hourly trigger (SimpleFIN/GoCardless are rate-limited from above, not below;
+polling them hourly doesn't produce fresher data) and isolates failures per
+account so one expired credential doesn't block the rest.
 
 Transfer detection runs before categorization so a transfer pair never gets
 miscategorized as an expense. Receipt splitting runs before categorization and is
@@ -179,8 +195,9 @@ ACTUAL_ENCRYPTION_PASSWORD=...     # E2EE budget password
 The shipped code lives under `actual_cat/` (orchestration in `__main__.py`, config
 loading in `config.py`, the OpenAI-compatible client in `llm.py`, prompts in
 `prompts.py`, the live-schema renderer in `schema.py`, the categorization and
-transfer pipelines, history hints, tag helpers, the audit logger, and the
-`receipts/` subpackage). The [README](../README.md#layout) has the full annotated
+transfer pipelines, history hints, tag helpers, the audit logger, the scheduled
+bank-sync pipeline (`bank_sync.py`) with its own run-state gate (`state.py`), and
+the `receipts/` subpackage). The [README](../README.md#layout) has the full annotated
 tree — prefer reading the modules themselves over duplicating skeletons here.
 
 ## Testing strategy
@@ -272,6 +289,15 @@ removes a real transaction without saying so.
 - **LLM unreachable.** The client returns an error result rather than raising; the
   pipelines log and skip individual failures, completing the run partially rather
   than crashing.
+- **Bank sync running twice against the same quota.** If actual-server's own
+  schedule is left on *and* `[bank_sync]` is enabled, both consume the provider's
+  daily allowance for no benefit. Decide who owns sync before enabling — see the
+  rollout steps in [deployment.md](deployment.md).
+- **Expired bank credentials going unnoticed.** `bank_sync_account_failed` is
+  persistent once credentials expire (every run fails for that account) and
+  otherwise silent — the visible symptom is "transactions stopped appearing,"
+  noticed late. Worth a Kibana alert once the audit log ships to ELK; see
+  [observability.md](observability.md).
 
 ## Future enhancements (post-V1)
 

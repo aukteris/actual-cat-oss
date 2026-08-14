@@ -121,7 +121,60 @@ For example, `payee.name` may hold the institution's cleaned merchant name while
 raw descriptor often carries the most identifying signal. Verify the exact field
 mapping against your own bank's import format before deploying.
 
-## 3. Receipt splitting (optional)
+## 3. Scheduled bank sync (optional)
+
+Off by default (`[bank_sync] enabled = false`). Lower stakes than duplicate
+resolution — the failure mode is a redundant import or a missed pull, not a
+deleted transaction — but it touches the budget's write path, so stage it rather
+than flipping it straight to a short interval.
+
+**Step 0 — confirm no competing schedule.** If actual-server has its own SimpleFIN/
+GoCardless schedule configured, enabling `[bank_sync]` too spends the provider's
+quota twice for no benefit. Check the server config (or ask whoever manages it)
+before proceeding; turn the server-side schedule off first, or leave this feature
+off. Doing both is the one genuinely bad configuration.
+
+**Step 1 — read-only preflight.** Confirms which accounts are sync-enabled and that
+the provider reports them `configured`, without syncing anything:
+
+```bash
+cd /opt/actual-cat
+sudo -u actual-cat ACTUAL_PASSWORD=... venv/bin/python scripts/check_bank_sync.py
+```
+
+**Step 2 — enable at a deliberately long interval.** Add to `config.toml`:
+
+```toml
+[bank_sync]
+enabled = true
+interval_minutes = 720            # twice a day, well above SimpleFIN's own refresh rate
+grace_minutes = 5
+max_runs_per_day = 0              # 0 = uncapped; set to the provider's quota if using GoCardless
+accounts = []
+exclude_accounts = []
+lookback_days = 0
+allow_first_sync = false
+
+[state]
+path = "/opt/actual-cat/state/actual-cat.json"   # absolute in prod, like audit.log_path
+```
+
+Watch `bank_sync_ok` events in the audit log for about a week and compare imported
+counts against what actual-server was pulling before:
+
+```bash
+sudo -u actual-cat grep '"event": "bank_sync_ok"' /opt/actual-cat/logs/actual-cat.jsonl | python3 -m json.tool
+sudo -u actual-cat grep '"event": "bank_sync_account_failed"' /opt/actual-cat/logs/actual-cat.jsonl
+```
+
+**Step 3 — tighten the interval if the data supports it.** `interval_minutes = 360`
+or `240` once confirmed stable. There's no reason to go below the upstream refresh
+rate — for SimpleFIN that's a few times daily.
+
+Review `TimeoutStartSec=600` in `actual-cat.service` once sync is live — it adds a
+network round trip per account on top of a run that already calls an LLM.
+
+## 4. Receipt splitting (optional)
 
 Adds three components, all running as the `actual-cat` user:
 

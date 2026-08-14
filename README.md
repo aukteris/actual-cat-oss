@@ -16,18 +16,23 @@ AI-assisted transaction categorization worker for [Actual Budget](https://actual
    counterpart both land in the budget as separate rows (a tip added after
    authorization defeats the importer's amount match), the pending row is
    detected and tagged for review, or deleted in apply mode. Off by default.
+5. **Scheduled bank sync** — the worker can pull fresh transactions itself via
+   `actualpy`'s `run_bank_sync`, on its own interval (independent of the hourly
+   pipeline tick), so import lands before rules and categorization run in the
+   same pass instead of waiting on actual-server's own schedule. Off by default.
 
-It runs the built-in rule engine first, then duplicate resolution, then the
-transfer pipeline, then the receipt pipeline, then categorization on whatever
-remains. By default all LLM pipelines run in **suggest mode**: they write tags to
-transaction notes and never touch category fields, create splits, or delete rows
-until advanced to apply mode.
+It runs bank sync first (if enabled), then the built-in rule engine, then
+duplicate resolution, then the transfer pipeline, then the receipt pipeline, then
+categorization on whatever remains. By default all LLM pipelines run in
+**suggest mode**: they write tags to transaction notes and never touch category
+fields, create splits, or delete rows until advanced to apply mode.
 
 ## How it works
 
 ```
-rule engine  →  pending duplicates  →  transfer detection  →  receipt splitting  →  categorization
- (Actual's)      (LLM, off)             (LLM, suggest)        (LLM, suggest)        (LLM, suggest)
+bank sync  →  rule engine  →  pending duplicates  →  transfer detection  →  receipt splitting  →  categorization
+ (gated,       (Actual's)      (LLM, off)             (LLM, suggest)        (LLM, suggest)        (LLM, suggest)
+  off)
 ```
 
 - Duplicate resolution runs first, before any other pipeline: its apply action is
@@ -177,6 +182,25 @@ what it should not:
 ACTUAL_PASSWORD=... venv/bin/python scripts/backtest_duplicates.py   # read-only
 ```
 
+**Scheduled bank sync** (`[bank_sync]` / `[state]`): off unless `enabled = true`;
+omitting `[bank_sync]` leaves sync entirely to actual-server's own schedule.
+
+| Key | Meaning |
+|---|---|
+| `interval_minutes` | Independent of the timer cadence — SimpleFIN/GoCardless refresh a few times a day at most, so sync wants a slower tick than the hourly pipeline |
+| `grace_minutes` | Absorbs the systemd timer's `RandomizedDelaySec` jitter so the effective interval doesn't drift over time |
+| `max_runs_per_day` | Per-account cap against a provider quota (0 = uncapped); GoCardless documents a hard 4/account/day limit |
+| `accounts` / `exclude_accounts` | Allow/deny list by account name; empty `accounts` = all sync-enabled accounts |
+| `lookback_days` | 0 uses actualpy's own per-account "since the last transaction" window; widening it re-pulls rows the duplicates pipeline then has to dedupe |
+| `allow_first_sync` | Guards against the library's automatic "Starting Balance" reconciliation row firing unannounced on a zero-transaction account |
+| `[state].path` | Where run/gate state (last run, per-account daily counts) is persisted as JSON |
+
+Before enabling, run the read-only preflight against production:
+
+```bash
+ACTUAL_PASSWORD=... venv/bin/python scripts/check_bank_sync.py   # read-only
+```
+
 ## Install & run
 
 ```bash
@@ -226,6 +250,8 @@ actual_cat/
 ├── transfers.py       # transfer candidate finder + pairing
 ├── duplicates.py      # pending-duplicate clustering, rules R1-R5, adjudication, deletion
 ├── sync_meta.py       # raw_synced_data parsing: is_pending, bank id, descriptor tokens
+├── bank_sync.py       # scheduled bank sync: account selection, per-account run_bank_sync, failure isolation
+├── state.py           # JSON run-state: due()/daily-cap gate for bank_sync (reusable by future pipelines)
 ├── tags.py            # tag markers, slugify, idempotent prepend
 ├── audit.py           # JSONL audit logger
 └── receipts/
