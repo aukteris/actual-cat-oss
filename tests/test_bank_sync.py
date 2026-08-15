@@ -97,7 +97,7 @@ def test_not_due_is_skipped(tmp_path: Path):
 
     p1, p2 = _patched([make_account()])
     with p1, p2 as get_transactions_mock:
-        result = process_bank_sync(actual, audit, cfg, state)
+        result = process_bank_sync(actual, audit, cfg, state, now=NOW)
 
     assert result == 0
     get_transactions_mock.assert_not_called()
@@ -212,7 +212,7 @@ def test_daily_cap_blocks_a_call_the_interval_would_have_allowed(tmp_path: Path)
 
     p1, p2 = _patched([acct])
     with p1, p2:
-        result = process_bank_sync(actual, audit, cfg, state)
+        result = process_bank_sync(actual, audit, cfg, state, now=NOW)
 
     assert result == 0
     actual.run_bank_sync.assert_not_called()

@@ -56,15 +56,18 @@ def _is_first_sync(actual: Any, acct: Any) -> bool:
 
 
 def process_bank_sync(
-    actual: Any, audit: "AuditLogger", cfg: "Config", state: "SyncState"
+    actual: Any, audit: "AuditLogger", cfg: "Config", state: "SyncState",
+    now: datetime | None = None,
 ) -> int:
     """Sync every eligible account, isolating failures per account.
 
     Returns the number of transactions imported. Persists state after the
     loop even on partial failure, so an account that errored isn't retried
     on the next tick just because a later account in the list succeeded.
+    `now` defaults to the real clock; tests inject a fixed value so interval
+    and daily-cap checks don't drift relative to a hardcoded state fixture.
     """
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
 
     if not cfg.bank_sync_enabled:
         audit._write({"event": "bank_sync_skipped", "pipeline": PIPELINE, "reason": "disabled"})
