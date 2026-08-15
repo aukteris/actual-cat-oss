@@ -14,6 +14,8 @@ most appropriate category and any applicable tags as JSON.
 
 - Refunds (positive amounts on credit cards) get categorized by the
   original purchase category, not as income
+- Genuine income (payroll, deposits from an employer) should use the
+  appropriate Income category when one exists in the schema
 - Recurring small amounts ($X.99 monthly) are likely subscriptions
 
 ## Output format

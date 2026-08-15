@@ -205,8 +205,8 @@ tree — prefer reading the modules themselves over duplicating skeletons here.
 ### Unit tests
 
 Cover the pure-logic modules that don't need external services — marker-tag
-detection and append idempotency, schema-text rendering (tombstoned/income groups
-excluded), prompt rendering with missing optional fields, and the
+detection and append idempotency, schema-text rendering (tombstoned groups
+excluded, income groups included), prompt rendering with missing optional fields, and the
 apply/suggest/idempotency branches of each pipeline driven by a mocked LLM client.
 A simple mock that pops queued responses off a list is sufficient:
 

@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from actual_cat.categorization import find_uncategorized, process_categorization
+from actual_cat.categorization import find_uncategorized, is_income_category, process_categorization
 
 
 class MockLLM:
@@ -125,6 +125,30 @@ class TestFindUncategorized:
         assert result == []
 
 
+class TestIsIncomeCategory:
+    def test_true_for_category_in_income_group(self):
+        cat = MagicMock()
+        cat.id = "cat-1"
+        group = MagicMock()
+        group.is_income = 1
+        group.categories = [cat]
+        with patch("actual_cat.categorization.get_category_groups", return_value=[group]):
+            assert is_income_category(MagicMock(), "cat-1") is True
+
+    def test_false_for_category_in_expense_group(self):
+        cat = MagicMock()
+        cat.id = "cat-1"
+        group = MagicMock()
+        group.is_income = 0
+        group.categories = [cat]
+        with patch("actual_cat.categorization.get_category_groups", return_value=[group]):
+            assert is_income_category(MagicMock(), "cat-1") is False
+
+    def test_false_when_id_not_found(self):
+        with patch("actual_cat.categorization.get_category_groups", return_value=[]):
+            assert is_income_category(MagicMock(), "cat-1") is False
+
+
 class TestProcessCategorization:
     def _run(self, txns, llm_responses, mode="suggest", threshold="high"):
         import actual_cat.prompts as prompts
@@ -204,6 +228,46 @@ class TestProcessCategorization:
 
         audit.log_failure.assert_called_once()
         assert txn.category_id is None
+
+    def _run_income_on_outflow(self, mode):
+        txn = make_txn()  # amount=-8500, an outflow
+        import actual_cat.prompts as prompts
+
+        llm = MockLLM([
+            {"category": "Income / Salary", "confidence": "high", "tags": [], "reasoning": "x"}
+        ])
+        audit = MagicMock()
+        cfg = make_cfg(mode=mode, threshold="high")
+        actual = MagicMock()
+
+        income_cat = MagicMock()
+        income_cat.id = "cat-uuid"
+        income_group = MagicMock()
+        income_group.is_income = 1
+        income_group.categories = [income_cat]
+
+        with (
+            patch("actual_cat.categorization.get_transactions", return_value=[txn]),
+            patch("actual_cat.categorization.get_category_groups", return_value=[income_group]),
+            patch("actual_cat.categorization.lookup_category_id", return_value="cat-uuid"),
+        ):
+            process_categorization(actual, llm, audit, cfg, "schema", prompts)
+
+        return txn, audit
+
+    def test_income_category_on_outflow_rejected_in_apply_mode(self):
+        txn, audit = self._run_income_on_outflow(mode="apply")
+        audit.log_failure.assert_called_once()
+        assert txn.category_id is None
+        assert txn.notes is None  # no tag written either
+
+    def test_income_category_on_outflow_rejected_in_suggest_mode(self):
+        # The safeguard sits before the mode check, so it blocks regardless
+        # of categorization_mode — mirrors the hallucinated-category branch.
+        txn, audit = self._run_income_on_outflow(mode="suggest")
+        audit.log_failure.assert_called_once()
+        assert txn.category_id is None
+        assert txn.notes is None
 
     def test_llm_error_logs_failure_and_continues(self):
         txn1 = make_txn(id="t1")

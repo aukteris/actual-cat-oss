@@ -87,6 +87,23 @@ def lookup_category_id(session: Any, category_path: str) -> str | None:
     return None
 
 
+def is_income_category(session: Any, cat_id: str) -> bool:
+    """True if cat_id resolves to a category in an income group.
+
+    Deterministic safeguard companion to schema.build_schema_text no longer
+    excluding income groups: negative amounts (money leaving the account)
+    can never legitimately be income, so this backs the outflow check in
+    process_categorization regardless of what the LLM picks.
+    """
+    for group in get_category_groups(session):
+        if not group.is_income:
+            continue
+        for cat in group.categories:
+            if cat.id == cat_id:
+                return True
+    return False
+
+
 def process_categorization(
     actual: Any,
     llm: "LLMClient",
@@ -128,6 +145,13 @@ def process_categorization(
         if cat_id is None:
             audit.log_failure(
                 txn, f"Invalid category from LLM: {category!r}", pipeline="categorization"
+            )
+            continue
+
+        if txn.amount < 0 and is_income_category(actual.session, cat_id):
+            audit.log_failure(
+                txn, f"Income category on outflow transaction: {category!r}",
+                pipeline="categorization",
             )
             continue
 

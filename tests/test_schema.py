@@ -34,7 +34,7 @@ def test_basic_schema_text():
     assert "  - Rent" in text
 
 
-def test_income_groups_excluded():
+def test_income_groups_included():
     groups = [
         make_group("Income", is_income=1, cats=[make_cat("Salary")]),
         make_group("Spending", cats=[make_cat("Food")]),
@@ -42,8 +42,8 @@ def test_income_groups_excluded():
     with patch("actual_cat.schema.get_category_groups", return_value=groups):
         text = build_schema_text(MagicMock())
 
-    assert "Income" not in text
-    assert "Salary" not in text
+    assert "Income" in text
+    assert "  - Salary" in text
     assert "Spending" in text
 
 
