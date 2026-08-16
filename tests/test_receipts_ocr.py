@@ -347,3 +347,167 @@ class TestRotationGate:
             request_timeout_seconds=None, budget_seconds=None,
         )
         assert llm.calls[0][4] is None
+
+
+# ---------------------------------------------------------------------------
+# Auto-crop
+#
+# A receipt photographed on a table or floor can be a narrow strip in a big
+# frame; the vision server clamps every image to a fixed token budget, so the
+# background eats most of it. Detection must be conservative — a crop that clips
+# the total is worse than the wasted tokens.
+# ---------------------------------------------------------------------------
+
+class TestAutocrop:
+    def _scene(self, frame=(400, 600), rect=(150, 40, 250, 560), bg=30, fg=245):
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", frame, (bg, bg, bg))
+        ImageDraw.Draw(img).rectangle(rect, fill=(fg, fg, fg))
+        return img
+
+    def test_finds_a_narrow_bright_strip(self):
+        from actual_cat.receipts.ocr import _receipt_bbox
+        box = _receipt_bbox(self._scene())
+        assert box is not None
+        x0, y0, x1, y1 = box
+        # Within padding of the drawn rectangle (150, 40, 250, 560)
+        assert abs(x0 - 150) < 25 and abs(x1 - 250) < 25
+        assert abs(y0 - 40) < 25 and abs(y1 - 560) < 25
+
+    def test_full_height_strip_is_not_collapsed_vertically(self):
+        """A narrow strip never clears a full-width row threshold, so rows must be
+        judged inside the column band — otherwise the box collapses vertically."""
+        from actual_cat.receipts.ocr import _receipt_bbox
+        box = _receipt_bbox(self._scene(frame=(800, 2000), rect=(360, 20, 440, 1980)))
+        assert box is not None
+        assert (box[3] - box[1]) > 1800  # nearly the full height, not a fragment
+
+    def test_speck_does_not_blow_up_the_box(self):
+        from PIL import ImageDraw
+
+        from actual_cat.receipts.ocr import _receipt_bbox
+        img = self._scene()
+        ImageDraw.Draw(img).rectangle((5, 5, 9, 9), fill=(255, 255, 255))  # debris
+        box = _receipt_bbox(img)
+        assert box is not None
+        assert box[0] > 100  # the speck at x=5 was not absorbed
+
+    def test_mostly_bright_frame_falls_back(self):
+        """Receipt on a white counter — nothing to gain, don't risk clipping."""
+        from actual_cat.receipts.ocr import _receipt_bbox
+        assert _receipt_bbox(self._scene(rect=(2, 2, 398, 598))) is None
+
+    def test_uniform_frame_falls_back(self):
+        from PIL import Image
+
+        from actual_cat.receipts.ocr import _receipt_bbox
+        assert _receipt_bbox(Image.new("RGB", (400, 600), (200, 200, 200))) is None
+
+    def test_autocrop_wrapper_reports_fraction(self):
+        from actual_cat.receipts.ocr import _autocrop_receipt
+        cropped, fraction = _autocrop_receipt(self._scene())
+        assert fraction is not None and 0.0 < fraction < 1.0
+        assert cropped.size[0] < 400
+
+    def test_autocrop_never_raises(self):
+        from actual_cat.receipts.ocr import _autocrop_receipt
+        img, fraction = _autocrop_receipt(object())  # not an image at all
+        assert fraction is None
+
+    def test_normalize_image_honours_the_flag(self):
+        import io as _io
+
+        from actual_cat.receipts.ocr import _normalize_image
+        buf = _io.BytesIO()
+        self._scene().save(buf, format="JPEG", quality=95)
+        raw = buf.getvalue()
+        _, on, frac_on = _normalize_image(raw, autocrop=True)
+        _, off, frac_off = _normalize_image(raw, autocrop=False)
+        assert frac_on is not None and frac_off is None
+        assert on.size[0] < off.size[0]
+
+    def test_unopenable_bytes_fall_back(self):
+        from actual_cat.receipts.ocr import _normalize_image
+        data, img, frac = _normalize_image(b"\xff\xd8\xff" + b"\x00" * 10)
+        assert data == b"\xff\xd8\xff" + b"\x00" * 10
+        assert img is None and frac is None
+
+
+class TestCropFallbackPass:
+    _SCHEMA = "Food\n  - Groceries"
+    _SYSTEM = "You are a receipt parser."
+
+    def _scene_bytes(self) -> bytes:
+        import io as _io
+
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (400, 600), (30, 30, 30))
+        ImageDraw.Draw(img).rectangle((150, 40, 250, 560), fill=(245, 245, 245))
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        return buf.getvalue()
+
+    def _good(self, n=6):
+        return {"merchant": "Shop", "date": "2026-06-01", "total_cents": n * 100,
+                "line_items": [{"description": f"i{i}", "amount_cents": 100,
+                                "category": "Food / Groceries"} for i in range(n)]}
+
+    def test_any_imperfect_cropped_read_is_checked_against_the_full_frame(self):
+        """A misplaced crop returns a coherent read of the part it kept — nothing
+        about it looks wrong. Verifying against the full frame is the only catch."""
+        class Seq(MockLLM):
+            def __init__(self, responses):
+                super().__init__({})
+                self._responses = list(responses)
+            def complete_json_vision(self, s, u, b, m, *, timeout=None):
+                self.calls.append((s, u, b, m, timeout))
+                return self._responses.pop(0)
+
+        # Coherent, all amounts readable, simply doesn't reconcile — exactly what
+        # a crop that clipped half the receipt produces.
+        clipped = {"merchant": "Shop", "total_cents": 5000,
+                   "line_items": [{"description": f"i{i}", "amount_cents": 100}
+                                  for i in range(6)]}
+        llm = Seq([clipped, self._good()])
+        result = ocr_receipt(self._scene_bytes(), llm, self._SYSTEM, self._SCHEMA)
+        assert len(llm.calls) == 2          # cropped, then uncropped — no rotations
+        assert result["confidence"] == "high"
+        assert result["cropped"] is False   # the winning read was the full frame
+
+    def test_good_cropped_read_does_not_retry(self):
+        llm = MockLLM(self._good())
+        result = ocr_receipt(self._scene_bytes(), llm, self._SYSTEM, self._SCHEMA)
+        assert len(llm.calls) == 1
+        assert result["cropped"] is True
+        assert result["crop_fraction"] is not None
+
+    def test_cropped_read_wins_when_it_reconciles_better(self):
+        """The full-frame check must not override a good crop — on the receipt
+        that motivated cropping, the cropped read is the correct one."""
+        class Seq(MockLLM):
+            def __init__(self, responses):
+                super().__init__({})
+                self._responses = list(responses)
+            def complete_json_vision(self, s, u, b, m, *, timeout=None):
+                self.calls.append((s, u, b, m, timeout))
+                return self._responses.pop(0)
+
+        # Both low confidence, but the cropped read reconciles far closer to its
+        # own total ($1 out) than the full-frame read does ($10 out).
+        near = {"merchant": "Shop", "total_cents": 700,
+                "line_items": [{"description": f"i{i}", "amount_cents": 100} for i in range(6)]}
+        far = {"merchant": "Shop", "total_cents": 1600,
+               "line_items": [{"description": f"i{i}", "amount_cents": 100} for i in range(6)]}
+        llm = Seq([near, far])
+        result = ocr_receipt(self._scene_bytes(), llm, self._SYSTEM, self._SCHEMA)
+        assert len(llm.calls) == 2
+        assert result["cropped"] is True          # the crop was kept
+        assert result["total_cents"] == 700
+
+    def test_no_full_frame_check_when_cropping_is_off(self):
+        clipped = {"merchant": "Shop", "total_cents": 5000,
+                   "line_items": [{"description": f"i{i}", "amount_cents": 100}
+                                  for i in range(6)]}
+        llm = MockLLM(clipped)
+        ocr_receipt(self._scene_bytes(), llm, self._SYSTEM, self._SCHEMA, autocrop=False)
+        assert len(llm.calls) == 1  # nothing to second-guess

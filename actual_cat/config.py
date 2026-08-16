@@ -36,6 +36,7 @@ class Config:
     receipts_ocr_request_timeout_seconds: float | None  # per vision pass; None = no cap
     receipts_ocr_budget_seconds: float | None           # all passes for one receipt
     receipts_max_ocr_attempts: int   # runs a receipt gets before it's failed; 0 = unlimited
+    receipts_autocrop: bool          # crop to the receipt before OCR
     # pending-duplicate pipeline
     duplicates_enabled: bool
     duplicates_mode: str             # "suggest" | "apply"
@@ -189,6 +190,7 @@ def load_config(path: str = "config.toml") -> Config:
             "ocr_budget_seconds", ocr.DEFAULT_BUDGET_SECONDS
         ),
         receipts_max_ocr_attempts=receipts.get("max_ocr_attempts", 3),
+        receipts_autocrop=receipts.get("autocrop", True),
         # Absent [duplicates] block leaves an existing install exactly as it was:
         # the pipeline off, and the other pipelines still seeing pending rows.
         duplicates_enabled=duplicates.get("enabled", False),

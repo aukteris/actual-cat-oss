@@ -8,6 +8,7 @@ image-specific — it operates on the already-parsed structure.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -168,6 +169,52 @@ def resolve_receipt_date(
     return None, False
 
 
+# Rows a two-column receipt prints alongside an already-discounted price. A model
+# that emits both the discounted price and these subtracts every discount twice.
+_SAVINGS_ROW_RE = re.compile(
+    r"member\s+savings|store\s+coupon|department\s+savings|personalized|basket\s+savings"
+    r"|savings\s+total|total\s+savings",
+    re.IGNORECASE,
+)
+
+
+def drop_double_counted_savings(
+    items: list[dict[str, Any]], total_cents: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """Remove savings rows that were already applied to the prices beside them.
+
+    Returns (items, dropped_any).
+
+    Receipts with a pre-discount "Price" and a post-discount "You Pay" column also
+    print per-item savings rows. Recording the "You Pay" amount *and* those rows
+    counts every discount twice. The prompt asks the model not to do this, and it
+    obeys on some receipts and not others — so the arithmetic is checked here
+    instead of trusted there.
+
+    Deliberately conservative: the rows are dropped ONLY when doing so makes the
+    items reconcile with the printed total. That self-validates. On a receipt whose
+    discount rows are genuine (a single price column, as Costco prints), removing
+    them moves the sum away from the total, so nothing is dropped.
+    """
+    if not isinstance(total_cents, int):
+        return items, False
+    readable = [i["amount_cents"] for i in items if isinstance(i["amount_cents"], int)]
+    if len(readable) < len(items):
+        return items, False  # an unreadable amount makes the arithmetic meaningless
+    if abs(total_cents - sum(readable)) <= TOLERANCE_CENTS:
+        return items, False  # already reconciles; nothing to repair
+
+    kept = [
+        i for i in items
+        if not (i["amount_cents"] < 0 and _SAVINGS_ROW_RE.search(i["description"] or ""))
+    ]
+    if len(kept) == len(items):
+        return items, False
+    if abs(total_cents - sum(i["amount_cents"] for i in kept)) <= TOLERANCE_CENTS:
+        return kept, True
+    return items, False
+
+
 def compute_confidence(items: list[dict[str, Any]], total_cents: int) -> tuple[str, int]:
     """Return (confidence, abs_diff).
 
@@ -218,6 +265,7 @@ def validate_receipt(data: dict[str, Any]) -> dict[str, Any]:
             amt = None
         items.append({"description": str(desc), "amount_cents": amt, "category": str(cat)})
 
+    items, dropped_savings = drop_double_counted_savings(items, total_cents)
     confidence, _ = compute_confidence(items, total_cents)
 
     # For high confidence (rounding-only diff), nudge the largest item to make
@@ -252,6 +300,7 @@ def validate_receipt(data: dict[str, Any]) -> dict[str, Any]:
         "total_cents": total_cents,
         "line_items": items,
         "confidence": confidence,
+        "dropped_double_counted_savings": dropped_savings,
         "unreadable_count": unreadable_count,
         "amount_diff_cents": amount_diff_cents,
     }

@@ -55,6 +55,7 @@ def process_inbox(
                 inbox_meta, llm, prompts, schema_text,
                 request_timeout_seconds=cfg.receipts_ocr_request_timeout_seconds,
                 budget_seconds=cfg.receipts_ocr_budget_seconds,
+                autocrop=cfg.receipts_autocrop,
             )
             if "error" in result:
                 receipt_store.save_failed(cfg.receipts_store_path, receipt_id, result["error"])
@@ -84,7 +85,9 @@ def process_inbox(
                 audit._write({"event": "receipt_ocr_ok", "pipeline": "receipt",
                               "receipt_id": receipt_id,
                               "merchant": result.get("merchant"),
-                              "total_cents": result.get("total_cents")})
+                              "total_cents": result.get("total_cents"),
+                              "cropped": result.get("cropped"),
+                              "crop_fraction": result.get("crop_fraction")})
         except Exception as e:
             receipt_store.save_failed(cfg.receipts_store_path, receipt_id, str(e))
             audit._write({"event": "receipt_ocr_failed", "pipeline": "receipt",
