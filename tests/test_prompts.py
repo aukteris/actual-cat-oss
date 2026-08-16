@@ -106,3 +106,34 @@ class TestDuplicateSystemPrompt:
         from actual_cat.prompts import DUPLICATE_SYSTEM
 
         assert "deleting the pending row" in DUPLICATE_SYSTEM
+
+
+# ---------------------------------------------------------------------------
+# Receipt extraction rules
+#
+# The two-column rule lives in the block shared by the image and text prompts —
+# an emailed Safeway receipt has the same Price / You Pay / savings structure as
+# a photographed one, and double-counting discounts there would be just as wrong.
+# ---------------------------------------------------------------------------
+
+class TestReceiptDiscountRules:
+    def test_both_receipt_prompts_carry_the_two_column_rule(self):
+        from actual_cat.prompts import RECEIPT_OCR_SYSTEM, RECEIPT_TEXT_SYSTEM
+        for prompt in (RECEIPT_OCR_SYSTEM, RECEIPT_TEXT_SYSTEM):
+            assert "Receipts with two price columns" in prompt
+            assert "You Pay" in prompt
+            assert "never be counted twice" in prompt
+
+    def test_basket_level_discounts_are_distinguished_from_per_item_ones(self):
+        """The per-item savings are already in "You Pay"; a basket-level discount
+        is not, and dropping it leaves the items short by exactly its amount."""
+        from actual_cat.prompts import RECEIPT_OCR_SYSTEM
+        assert "ADDITIONAL DISCOUNTS" in RECEIPT_OCR_SYSTEM
+        assert "Basket Savings" in RECEIPT_OCR_SYSTEM
+
+    def test_trailing_minus_rule_points_at_the_exception(self):
+        """The older rule would otherwise contradict the new section outright."""
+        from actual_cat.prompts import RECEIPT_OCR_SYSTEM
+        i_rule = RECEIPT_OCR_SYSTEM.index("trailing minus")
+        i_ref = RECEIPT_OCR_SYSTEM.index("Receipts with two price columns")
+        assert i_rule < i_ref  # the bullet references the section that follows it

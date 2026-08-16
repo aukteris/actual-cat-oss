@@ -129,6 +129,12 @@ apply_confidence_threshold = "high"
 ocr_request_timeout_seconds = 180   # one vision pass
 ocr_budget_seconds = 420            # hard cap across every pass for one receipt
 max_ocr_attempts = 3                # then fail the receipt so it can't wedge the worker
+# Crop to the receipt before OCR. A receipt photographed on a table or floor can
+# occupy a quarter of the frame, and the vision server clamps every image to a
+# fixed token budget — so most of that budget goes on background instead of text.
+# Detection assumes bright paper on a darker surface and falls back to the full
+# frame whenever it isn't confident.
+autocrop = true
 
 [email]
 enabled = false

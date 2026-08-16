@@ -59,6 +59,7 @@ def _cfg(store_path: str, **overrides):
         receipts_max_ocr_attempts=3,
         receipts_ocr_request_timeout_seconds=180.0,
         receipts_ocr_budget_seconds=420.0,
+        receipts_autocrop=True,
         history_enabled=False,
         history_item_top_n=3,
     )

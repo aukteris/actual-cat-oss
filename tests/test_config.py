@@ -528,3 +528,29 @@ def test_load_config_llm_timeout_override(
     assert cfg.llm_text.timeout_seconds == 45
     # Vision inherits, like the sampling params do.
     assert cfg.llm_vision.timeout_seconds == 45
+
+
+def test_load_config_autocrop_defaults_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    cfg = load_config(str(_make_toml(tmp_path, _LLM_BLOCK)))
+    assert cfg.receipts_autocrop is True
+
+
+def test_load_config_autocrop_can_be_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt on a light background can defeat detection — the flag turns it
+    off without a deploy."""
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    p = tmp_path / "config.toml"
+    p.write_text(
+        _MINIMAL_TOML_TEMPLATE.format(llm_block=_LLM_BLOCK)
+        + textwrap.dedent("""
+            [receipts]
+            enabled = true
+            autocrop = false
+        """)
+    )
+    assert load_config(str(p)).receipts_autocrop is False

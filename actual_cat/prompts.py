@@ -167,7 +167,22 @@ categorizes each item.
 - Every line item that represents something purchased or a discount applied.
 - Duplicate items: if the same item appears multiple times, include one entry per occurrence.
 - Discounts and credits: a price printed with a trailing minus (e.g. "2.00-") is a
-  discount — set amount_cents to a **negative** integer (e.g. -200).
+  discount — set amount_cents to a **negative** integer (e.g. -200). Exception: on a
+  receipt with two price columns, see "Receipts with two price columns" below — those
+  savings rows are already reflected in the price you record, and emitting them too
+  subtracts every discount twice.
+
+### Receipts with two price columns
+Some receipts print BOTH a pre-discount "Price" column and a post-discount
+"You Pay" column, alongside per-item savings rows ("Member Savings",
+"Store Coupon", "Department Savings", "Personalized").
+A discount must never be counted twice. Use the "You Pay" amount for each item
+and OMIT those per-item savings rows — that discount is already applied.
+
+Basket- or order-level discounts are different: a discount printed AFTER the
+last item, under a heading such as "ADDITIONAL DISCOUNTS" / "Basket Savings",
+is NOT reflected in any item's "You Pay" amount. Emit it as its own negative
+line item. The line items must sum to the grand total.
 
 ### What to exclude
 - Section dividers and cart markers — lines decorated with asterisks

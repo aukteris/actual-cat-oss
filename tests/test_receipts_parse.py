@@ -5,6 +5,7 @@ import pytest
 
 from actual_cat.receipts.parse import (
     compute_confidence,
+    drop_double_counted_savings,
     infer_country_code,
     resolve_receipt_date,
     validate_receipt,
@@ -369,3 +370,82 @@ class TestValidateAndResolve:
         )
         assert iso_date == "2026-08-09"
         assert was_ambiguous is False
+
+
+class TestDropDoubleCountedSavings:
+    """A two-column receipt prints an already-discounted price AND separate savings
+    rows. Emitting both subtracts every discount twice — the real failure that made
+    a $57.64 receipt read as $51.64 and a $218.94 one as $63.10."""
+
+    def _items(self, pairs):
+        return [{"description": d, "amount_cents": a, "category": "x"} for d, a in pairs]
+
+    def test_drops_savings_rows_that_make_the_total_reconcile(self):
+        items = self._items([
+            ("GHRDL DK & SLT", 749), ("Member Savings", -50),
+            ("GHIRARDELLI MILK C", 749), ("Member Savings", -150),
+            ("PLSH FD 7IN BEAR", 869), ("BOOKS", 599),
+            ("FORT GEORGE SHERMA", 1299), ("DEP BEER 6 PK NFS", 60),
+            ("Member Savings", -200),
+            ("PORTLAND CIDER LMT", 1399), ("DEP BEER 4 PK NFS", 40),
+            ("Member Savings", -200),
+        ])
+        kept, dropped = drop_double_counted_savings(items, 5764)
+        assert dropped is True
+        assert len(kept) == 8
+        assert sum(i["amount_cents"] for i in kept) == 5764
+        assert not any("Savings" in i["description"] for i in kept)
+
+    def test_leaves_genuine_discount_rows_alone(self):
+        """Costco prints one price column, so its discount rows are real. Removing
+        them moves the sum AWAY from the total, so they must survive."""
+        items = self._items([
+            ("BIG ITEM", 10000), ("INSTANT SAVINGS", -1500), ("SMALL ITEM", 500),
+        ])
+        kept, dropped = drop_double_counted_savings(items, 9000)
+        assert dropped is False
+        assert len(kept) == 3
+
+    def test_no_change_when_items_already_reconcile(self):
+        items = self._items([("A", 500), ("Member Savings", -100)])
+        kept, dropped = drop_double_counted_savings(items, 400)
+        assert dropped is False
+        assert len(kept) == 2
+
+    def test_no_change_when_dropping_would_overshoot(self):
+        """Only an exact reconciliation justifies deleting data."""
+        items = self._items([("A", 500), ("Member Savings", -100), ("B", 300)])
+        kept, dropped = drop_double_counted_savings(items, 9999)
+        assert dropped is False
+        assert len(kept) == 3
+
+    def test_unreadable_amount_disables_the_repair(self):
+        items = [
+            {"description": "A", "amount_cents": 500, "category": "x"},
+            {"description": "Member Savings", "amount_cents": None, "category": "x"},
+        ]
+        kept, dropped = drop_double_counted_savings(items, 500)
+        assert dropped is False
+
+    def test_validate_receipt_applies_the_repair_and_scores_high(self):
+        data = {
+            "merchant": "SAFEWAY", "total_cents": 5764,
+            "line_items": [
+                {"description": "GHRDL DK & SLT", "amount_cents": 749},
+                {"description": "Member Savings", "amount_cents": -50},
+                {"description": "GHIRARDELLI MILK C", "amount_cents": 749},
+                {"description": "Member Savings", "amount_cents": -150},
+                {"description": "PLSH FD 7IN BEAR", "amount_cents": 869},
+                {"description": "BOOKS", "amount_cents": 599},
+                {"description": "FORT GEORGE SHERMA", "amount_cents": 1299},
+                {"description": "DEP BEER 6 PK NFS", "amount_cents": 60},
+                {"description": "Member Savings", "amount_cents": -200},
+                {"description": "PORTLAND CIDER LMT", "amount_cents": 1399},
+                {"description": "DEP BEER 4 PK NFS", "amount_cents": 40},
+                {"description": "Member Savings", "amount_cents": -200},
+            ],
+        }
+        result = validate_receipt(data)
+        assert result["confidence"] == "high"
+        assert result["dropped_double_counted_savings"] is True
+        assert len(result["line_items"]) == 8

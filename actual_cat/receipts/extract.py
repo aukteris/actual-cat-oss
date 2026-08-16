@@ -30,6 +30,7 @@ def _extract_image(
     *,
     request_timeout_seconds: float | None,
     budget_seconds: float | None,
+    autocrop: bool,
 ) -> dict[str, Any]:
     image_path = meta.get("image_path", "")
     if not image_path:
@@ -42,6 +43,7 @@ def _extract_image(
         schema_text,
         request_timeout_seconds=request_timeout_seconds,
         budget_seconds=budget_seconds,
+        autocrop=autocrop,
     )
 
 
@@ -53,6 +55,7 @@ def _extract_text(
     *,
     request_timeout_seconds: float | None,  # noqa: ARG001 — uniform extractor signature
     budget_seconds: float | None,  # noqa: ARG001
+    autocrop: bool,  # noqa: ARG001
 ) -> dict[str, Any]:
     text = meta.get("text", "")
     if not text.strip():
@@ -74,6 +77,7 @@ def extract_receipt(
     *,
     request_timeout_seconds: float | None = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     budget_seconds: float | None = DEFAULT_BUDGET_SECONDS,
+    autocrop: bool = True,
 ) -> dict[str, Any]:
     """Dispatch a received receipt to its extractor based on input_kind.
 
@@ -93,4 +97,5 @@ def extract_receipt(
         schema_text,
         request_timeout_seconds=request_timeout_seconds,
         budget_seconds=budget_seconds,
+        autocrop=autocrop,
     )
