@@ -66,6 +66,26 @@ def save_received_text(
     return receipt_id
 
 
+def record_ocr_attempt(store_path: str, receipt_id: str) -> int:
+    """Increment and persist the OCR attempt counter on an inbox receipt.
+
+    Returns the new count. Call this BEFORE attempting OCR, not after: if the
+    process is killed mid-OCR (a slow vision call outliving the service manager's
+    timeout), nothing written after the attempt survives, so a count kept on the
+    success path would never advance and the receipt would retry forever.
+
+    Receipts written before this counter existed have no key and start at 0.
+    """
+    root = _store_root(store_path)
+    inbox_json = root / "inbox" / f"{receipt_id}.json"
+    meta = json.loads(inbox_json.read_text())
+    attempts = int(meta.get("ocr_attempts", 0)) + 1
+    meta["ocr_attempts"] = attempts
+    meta["last_ocr_attempt_ts"] = _now_iso()
+    inbox_json.write_text(json.dumps(meta, indent=2))
+    return attempts
+
+
 def save_pending(store_path: str, receipt_id: str, ocr_result: dict[str, Any]) -> None:
     """Move receipt from inbox to pending after successful OCR."""
     root = _store_root(store_path)

@@ -27,8 +27,8 @@ class MockLLM:
         self.text_calls.append((system, user))
         return self._response
 
-    def complete_json_vision(self, system, user, image_b64, media_type) -> dict:
-        self.vision_calls.append((system, user, image_b64, media_type))
+    def complete_json_vision(self, system, user, image_b64, media_type, *, timeout=None) -> dict:
+        self.vision_calls.append((system, user, image_b64, media_type, timeout))
         return self._response
 
 
@@ -82,3 +82,27 @@ def test_image_kind_missing_path_returns_error():
     llm = MockLLM(_GOOD_RESPONSE)
     result = extract_receipt({"input_kind": "image"}, llm, _PROMPTS, "schema")
     assert "error" in result
+
+
+def test_ocr_time_bounds_reach_the_vision_call(tmp_path):
+    image_path = tmp_path / "r.jpg"
+    image_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 10)
+    llm = MockLLM(_GOOD_RESPONSE)
+    meta = {"input_kind": "image", "image_path": str(image_path)}
+    extract_receipt(
+        meta, llm, _PROMPTS, "schema",
+        request_timeout_seconds=30, budget_seconds=600,
+    )
+    # Request timeout is the smaller bound, so it's the one that applies.
+    assert llm.vision_calls[0][4] == 30
+
+
+def test_text_kind_ignores_ocr_time_bounds():
+    llm = MockLLM(_GOOD_RESPONSE)
+    meta = {"input_kind": "text", "text": "SHOP\nx 1.00\nTotal 1.00"}
+    result = extract_receipt(
+        meta, llm, _PROMPTS, "schema",
+        request_timeout_seconds=30, budget_seconds=600,
+    )
+    assert result["merchant"] == "Shop"
+    assert len(llm.text_calls) == 1

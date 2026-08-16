@@ -23,6 +23,9 @@ class LLMProfile:
       min_p / chat_template_kwargs). Empty for standard OpenAI-compatible providers.
     - temperature / top_p / presence_penalty: omitted from the request when None,
       for models that reject them.
+    - timeout_seconds: per-request cap. None leaves the SDK default (600s), which is
+      long enough that a stalled call outlives the systemd unit's own timeout and
+      gets SIGTERMed instead of surfacing as a logged error.
     """
 
     endpoint: str
@@ -33,6 +36,7 @@ class LLMProfile:
     presence_penalty: float | None = 1.0
     json_mode: bool = True
     extra_body: dict[str, Any] = field(default_factory=dict)
+    timeout_seconds: float | None = None
 
 
 class LLMClient:
@@ -54,20 +58,27 @@ class LLMClient:
         self._max_retries = max_retries
         self._min_interval = 60.0 / requests_per_minute if requests_per_minute > 0 else 0.0
         self._last_call: float | None = None
-        self._clients: dict[tuple[str, str], OpenAI] = {}
+        self._clients: dict[tuple[str, str, float | None], OpenAI] = {}
         self._text_client = self._client_for(self.text)
         self._vision_client = self._client_for(self.vision)
 
     def _client_for(self, profile: LLMProfile) -> OpenAI:
-        """One OpenAI client per (endpoint, api_key) — reused across profiles."""
-        key = (profile.endpoint, profile.api_key)
+        """One OpenAI client per (endpoint, api_key, timeout) — reused across profiles.
+
+        The timeout is part of the key because text and vision commonly share an
+        endpoint and key (one local server) but not necessarily a timeout.
+        """
+        key = (profile.endpoint, profile.api_key, profile.timeout_seconds)
         client = self._clients.get(key)
         if client is None:
-            client = OpenAI(
-                base_url=profile.endpoint,
-                api_key=profile.api_key,
-                max_retries=self._max_retries,
-            )
+            kwargs: dict[str, Any] = {
+                "base_url": profile.endpoint,
+                "api_key": profile.api_key,
+                "max_retries": self._max_retries,
+            }
+            if profile.timeout_seconds is not None:
+                kwargs["timeout"] = profile.timeout_seconds
+            client = OpenAI(**kwargs)
             self._clients[key] = client
         return client
 
@@ -89,12 +100,18 @@ class LLMClient:
         messages: list[dict[str, Any]],
         *,
         retries: int,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Send messages, expect JSON. Returns parsed dict, or {"error": ...}.
 
         Retries up to `retries` times on JSON parse failures before giving up.
         Sampling params are included only when set; response_format and
         extra_body only when the profile asks for them.
+
+        `timeout` overrides the profile's default for this call and also disables
+        SDK-level retries. Both halves matter: the SDK retries timeouts, so a
+        `timeout` alone would silently mean `timeout * (1 + max_retries)`. Callers
+        that hand down a deadline (receipt OCR) need the bound to be the bound.
         """
         kwargs: dict[str, Any] = {"model": profile.model, "messages": messages}
         if profile.temperature is not None:
@@ -107,6 +124,9 @@ class LLMClient:
             kwargs["response_format"] = {"type": "json_object"}
         if profile.extra_body:
             kwargs["extra_body"] = profile.extra_body
+
+        if timeout is not None:
+            client = client.with_options(timeout=timeout, max_retries=0)
 
         last_err: dict[str, Any] = {}
         for _attempt in range(retries + 1):
@@ -135,12 +155,20 @@ class LLMClient:
         return self._complete(self._text_client, self.text, messages, retries=retries)
 
     def complete_json_vision(
-        self, system: str, user: str, image_b64: str, media_type: str, *, retries: int = 2
+        self,
+        system: str,
+        user: str,
+        image_b64: str,
+        media_type: str,
+        *,
+        retries: int = 2,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Like complete_json but attaches a base64-encoded image via image_url.
 
         media_type should be the MIME type, e.g. "image/jpeg". Uses the vision
         profile (which falls back to the text profile when not configured).
+        `timeout` caps this single call — see `_complete`.
         """
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
@@ -155,4 +183,6 @@ class LLMClient:
                 ],
             },
         ]
-        return self._complete(self._vision_client, self.vision, messages, retries=retries)
+        return self._complete(
+            self._vision_client, self.vision, messages, retries=retries, timeout=timeout
+        )

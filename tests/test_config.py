@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from actual_cat.config import _load_llm_profiles, load_config
+from actual_cat.receipts import ocr
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -476,3 +477,54 @@ def test_load_config_state_path_independent_of_bank_sync_enabled(
     cfg = load_config(str(p))
     assert cfg.bank_sync_enabled is False
     assert cfg.state_path == "custom/state.json"
+
+
+def test_load_config_ocr_bounds_default_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An install with no OCR keys still gets bounded, not unbounded, OCR."""
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    cfg = load_config(str(_make_toml(tmp_path, _LLM_BLOCK)))
+    assert cfg.receipts_ocr_request_timeout_seconds == ocr.DEFAULT_REQUEST_TIMEOUT_SECONDS
+    assert cfg.receipts_ocr_budget_seconds == ocr.DEFAULT_BUDGET_SECONDS
+    assert cfg.receipts_max_ocr_attempts == 3
+    # And every LLM call gets a timeout, so a stall can't outlive the service manager.
+    assert cfg.llm_text.timeout_seconds == 120.0
+    assert cfg.llm_vision.timeout_seconds == 120.0
+
+
+def test_load_config_ocr_bounds_read_from_receipts_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    p = tmp_path / "config.toml"
+    p.write_text(
+        _MINIMAL_TOML_TEMPLATE.format(llm_block=_LLM_BLOCK)
+        + textwrap.dedent("""
+            [receipts]
+            enabled = true
+            ocr_request_timeout_seconds = 90
+            ocr_budget_seconds = 200
+            max_ocr_attempts = 5
+        """)
+    )
+    cfg = load_config(str(p))
+    assert cfg.receipts_ocr_request_timeout_seconds == 90
+    assert cfg.receipts_ocr_budget_seconds == 200
+    assert cfg.receipts_max_ocr_attempts == 5
+
+
+def test_load_config_llm_timeout_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTUAL_PASSWORD", "pw")
+    llm_block = textwrap.dedent("""
+        [llm]
+        endpoint = "http://local/v1"
+        model = "my-model"
+        timeout_seconds = 45
+    """)
+    cfg = load_config(str(_make_toml(tmp_path, llm_block)))
+    assert cfg.llm_text.timeout_seconds == 45
+    # Vision inherits, like the sampling params do.
+    assert cfg.llm_vision.timeout_seconds == 45

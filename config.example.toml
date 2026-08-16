@@ -16,6 +16,10 @@ top_p = 0.85
 presence_penalty = 1.0
 # json_mode = true   # send response_format=json_object (default); set false if your
                      # model rejects it (the code-fence fallback still works)
+# Per-request cap on any LLM call. Without one the SDK default (600s) is long
+# enough that a stalled call outlives a systemd TimeoutStartSec and the run is
+# killed mid-call, logging nothing. Receipt OCR overrides this per pass.
+timeout_seconds = 120
 
 # llama.cpp-specific sampling params — send verbatim in extra_body.
 # Omit this entire table when using a cloud provider.
@@ -118,6 +122,13 @@ match_window_days = 3            # ± days around receipt date to search for mat
 expiry_days = 30                 # unmatched receipts expire after this many days
 mode = "suggest"                 # "suggest" | "apply"
 apply_confidence_threshold = "high"
+# OCR time bounds. A vision pass over a phone-camera receipt can cost ~100s against
+# a large local model, and a low-confidence read retries at three more rotations, so
+# an unbounded receipt can outlive the service manager's timeout and take the whole
+# run down with it — including the pipelines that come after receipts.
+ocr_request_timeout_seconds = 180   # one vision pass
+ocr_budget_seconds = 420            # hard cap across every pass for one receipt
+max_ocr_attempts = 3                # then fail the receipt so it can't wedge the worker
 
 [email]
 enabled = false
