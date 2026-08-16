@@ -6,6 +6,7 @@ from typing import cast
 from dotenv import load_dotenv
 
 from .llm import LLMProfile
+from .receipts import ocr  # OCR time-bound defaults live with the code that enforces them
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,9 @@ class Config:
     receipts_expiry_days: int
     receipts_mode: str               # "suggest" | "apply"
     receipts_threshold: str
+    receipts_ocr_request_timeout_seconds: float | None  # per vision pass; None = no cap
+    receipts_ocr_budget_seconds: float | None           # all passes for one receipt
+    receipts_max_ocr_attempts: int   # runs a receipt gets before it's failed; 0 = unlimited
     # pending-duplicate pipeline
     duplicates_enabled: bool
     duplicates_mode: str             # "suggest" | "apply"
@@ -105,6 +109,7 @@ def _load_llm_profiles(llm: dict[str, object]) -> tuple[LLMProfile, LLMProfile]:
         presence_penalty=float(llm.get("presence_penalty", 1.0)),  # type: ignore[arg-type]
         json_mode=bool(llm.get("json_mode", True)),
         extra_body=text_extra,
+        timeout_seconds=cast(float | None, llm.get("timeout_seconds", 120.0)),
     )
 
     vision_raw: dict[str, object] = llm.get("vision", {})  # type: ignore[assignment]
@@ -122,6 +127,12 @@ def _load_llm_profiles(llm: dict[str, object]) -> tuple[LLMProfile, LLMProfile]:
         presence_penalty=float(vision_raw.get("presence_penalty", text.presence_penalty)),  # type: ignore[arg-type]
         json_mode=bool(vision_raw.get("json_mode", text.json_mode)),
         extra_body=vision_extra,
+        # Inherited like the sampling params above. The receipts pipeline overrides
+        # this per request anyway (a vision pass legitimately takes far longer than
+        # a text one); this only bounds vision calls made outside that path.
+        timeout_seconds=cast(
+            float | None, vision_raw.get("timeout_seconds", text.timeout_seconds)
+        ),
     )
 
     return text, vision
@@ -171,6 +182,13 @@ def load_config(path: str = "config.toml") -> Config:
         receipts_expiry_days=receipts.get("expiry_days", 30),
         receipts_mode=receipts.get("mode", "suggest"),
         receipts_threshold=receipts.get("apply_confidence_threshold", "high"),
+        receipts_ocr_request_timeout_seconds=receipts.get(
+            "ocr_request_timeout_seconds", ocr.DEFAULT_REQUEST_TIMEOUT_SECONDS
+        ),
+        receipts_ocr_budget_seconds=receipts.get(
+            "ocr_budget_seconds", ocr.DEFAULT_BUDGET_SECONDS
+        ),
+        receipts_max_ocr_attempts=receipts.get("max_ocr_attempts", 3),
         # Absent [duplicates] block leaves an existing install exactly as it was:
         # the pipeline off, and the other pipelines still seeing pending rows.
         duplicates_enabled=duplicates.get("enabled", False),

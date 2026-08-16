@@ -234,6 +234,16 @@ def validate_receipt(data: dict[str, Any]) -> dict[str, Any]:
             )
             items[largest_idx]["amount_cents"] += diff
 
+    # Why the score came out the way it did. "low" conflates two very different
+    # failures — the model couldn't read the amounts, versus it read them fine and
+    # they simply don't reconcile — and callers (the rotation retry in ocr.py) have
+    # to tell those apart. Computed after the nudge so the reported diff matches the
+    # items actually returned. Additive keys; consumers read this dict by .get().
+    unreadable_count = sum(1 for i in items if not isinstance(i["amount_cents"], int))
+    amount_diff_cents = total_cents - sum(
+        i["amount_cents"] for i in items if isinstance(i["amount_cents"], int)
+    )
+
     return {
         "merchant": merchant.strip(),
         "date": data.get("date"),  # kept for back-compat; prefer date_raw
@@ -242,4 +252,6 @@ def validate_receipt(data: dict[str, Any]) -> dict[str, Any]:
         "total_cents": total_cents,
         "line_items": items,
         "confidence": confidence,
+        "unreadable_count": unreadable_count,
+        "amount_diff_cents": amount_diff_cents,
     }

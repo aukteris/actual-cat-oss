@@ -1,18 +1,37 @@
 """Unit tests for receipt OCR parsing and confidence scoring."""
 
 
+import io
+import time
+
 import pytest
 
-from actual_cat.receipts.ocr import _compute_confidence, _validate_response, ocr_receipt
+from actual_cat.receipts.ocr import (
+    _ROTATIONS,
+    _compute_confidence,
+    _validate_response,
+    ocr_receipt,
+)
 
 
 class MockLLM:
-    def __init__(self, response: dict):
+    def __init__(self, response: dict, *, sleep_seconds: float = 0.0):
         self._response = response
+        self._sleep_seconds = sleep_seconds
         self.calls: list[tuple] = []
 
-    def complete_json_vision(self, system: str, user: str, image_b64: str, media_type: str) -> dict:
-        self.calls.append((system, user, image_b64, media_type))
+    def complete_json_vision(
+        self,
+        system: str,
+        user: str,
+        image_b64: str,
+        media_type: str,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
+        self.calls.append((system, user, image_b64, media_type, timeout))
+        if self._sleep_seconds:
+            time.sleep(self._sleep_seconds)
         return self._response
 
 
@@ -234,3 +253,97 @@ class TestOcrReceipt:
         ocr_receipt(self._jpeg_bytes(), llm, self._SYSTEM, self._SCHEMA)
         # High confidence → only 1 LLM call (no rotation)
         assert len(llm.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Rotation gate + time bounds
+#
+# These use a real (Pillow-openable) image, unlike the tests above — the
+# rotation path is only reachable when Pillow can actually rotate the input.
+# ---------------------------------------------------------------------------
+
+class TestRotationGate:
+    _SCHEMA = "Food\n  - Groceries"
+    _SYSTEM = "You are a receipt parser."
+
+    def _real_jpeg(self) -> bytes:
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (40, 60), "white").save(buf, format="JPEG")
+        return buf.getvalue()
+
+    def _response(self, items: list[dict], total_cents: int) -> dict:
+        return {
+            "merchant": "Shop",
+            "date": "2026-06-01",
+            "total_cents": total_cents,
+            "line_items": items,
+        }
+
+    def test_legible_read_that_does_not_reconcile_skips_rotation(self):
+        """The regression test for the incident that motivated the gate.
+
+        A long receipt the model clearly read — many line items, almost all
+        amounts recovered — that simply doesn't add up. Rotating cannot help,
+        and each extra pass costs ~100s against a real vision model.
+        """
+        items = [
+            {"description": f"item {i}", "amount_cents": 100, "category": "Food / Groceries"}
+            for i in range(9)
+        ]
+        items.append({"description": "smudged", "amount_cents": None, "category": "Uncertain"})
+        llm = MockLLM(self._response(items, 5000))  # sum 900 vs total 5000
+        result = ocr_receipt(self._real_jpeg(), llm, self._SYSTEM, self._SCHEMA)
+        assert result["confidence"] == "low"
+        assert result["unreadable_count"] == 1
+        assert len(llm.calls) == 1
+
+    def test_too_few_line_items_rotates(self):
+        items = [{"description": "x", "amount_cents": 100, "category": "Food / Groceries"}]
+        llm = MockLLM(self._response(items, 5000))
+        ocr_receipt(self._real_jpeg(), llm, self._SYSTEM, self._SCHEMA)
+        assert len(llm.calls) == 1 + len(_ROTATIONS)
+
+    def test_mostly_unreadable_amounts_rotates(self):
+        items = [{"description": "x", "amount_cents": 100, "category": "Food / Groceries"}]
+        items += [
+            {"description": f"blur {i}", "amount_cents": None, "category": "Uncertain"}
+            for i in range(3)
+        ]
+        llm = MockLLM(self._response(items, 5000))  # 3 of 4 unreadable
+        ocr_receipt(self._real_jpeg(), llm, self._SYSTEM, self._SCHEMA)
+        assert len(llm.calls) == 1 + len(_ROTATIONS)
+
+    def test_structural_failure_rotates(self):
+        llm = MockLLM({"merchant": "", "total_cents": 100, "line_items": []})
+        result = ocr_receipt(self._real_jpeg(), llm, self._SYSTEM, self._SCHEMA)
+        assert "error" in result
+        assert len(llm.calls) == 1 + len(_ROTATIONS)
+
+    def test_budget_stops_rotation_early(self):
+        items = [{"description": "x", "amount_cents": 100, "category": "Food / Groceries"}]
+        llm = MockLLM(self._response(items, 5000), sleep_seconds=0.1)
+        ocr_receipt(
+            self._real_jpeg(), llm, self._SYSTEM, self._SCHEMA, budget_seconds=0.15,
+        )
+        # Gate is open (1 item), but the budget runs out before all rotations.
+        assert 1 <= len(llm.calls) < 1 + len(_ROTATIONS)
+
+    def test_request_timeout_clamped_to_remaining_budget(self):
+        items = [{"description": "x", "amount_cents": 100, "category": "Food / Groceries"}]
+        llm = MockLLM(self._response(items, 100))  # high confidence, single pass
+        ocr_receipt(
+            self._real_jpeg(), llm, self._SYSTEM, self._SCHEMA,
+            request_timeout_seconds=300, budget_seconds=30,
+        )
+        timeout = llm.calls[0][4]
+        assert timeout is not None and timeout <= 30
+
+    def test_bounds_disabled_when_none(self):
+        items = [{"description": "x", "amount_cents": 100, "category": "Food / Groceries"}]
+        llm = MockLLM(self._response(items, 100))
+        ocr_receipt(
+            self._real_jpeg(), llm, self._SYSTEM, self._SCHEMA,
+            request_timeout_seconds=None, budget_seconds=None,
+        )
+        assert llm.calls[0][4] is None

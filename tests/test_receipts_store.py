@@ -8,7 +8,9 @@ import pytest
 from actual_cat.receipts.store import (
     list_inbox,
     list_pending,
+    record_ocr_attempt,
     save_done,
+    save_failed,
     save_pending,
     save_received,
 )
@@ -90,3 +92,38 @@ class TestListPending:
         records = list_pending(store)
         assert len(records) == 1
         assert records[0]["status"] == "pending"
+
+
+class TestRecordOcrAttempt:
+    def test_first_attempt_returns_one(self, store):
+        receipt_id = save_received(store, Path("/tmp/img.jpg"), "ios")
+        assert record_ocr_attempt(store, receipt_id) == 1
+
+    def test_increments_and_persists_across_calls(self, store):
+        receipt_id = save_received(store, Path("/tmp/img.jpg"), "ios")
+        record_ocr_attempt(store, receipt_id)
+        record_ocr_attempt(store, receipt_id)
+        assert record_ocr_attempt(store, receipt_id) == 3
+        meta = json.loads((Path(store) / "inbox" / f"{receipt_id}.json").read_text())
+        assert meta["ocr_attempts"] == 3
+        assert "last_ocr_attempt_ts" in meta
+
+    def test_legacy_meta_without_counter_starts_at_zero(self, store):
+        receipt_id = save_received(store, Path("/tmp/img.jpg"), "ios")
+        inbox_json = Path(store) / "inbox" / f"{receipt_id}.json"
+        meta = json.loads(inbox_json.read_text())
+        meta.pop("ocr_attempts", None)  # explicit about the pre-counter meta shape
+        inbox_json.write_text(json.dumps(meta))
+        assert record_ocr_attempt(store, receipt_id) == 1
+
+    def test_counter_survives_into_the_done_record(self, store):
+        """The count is written before OCR runs, so it must still be there when a
+        later run gives up and files the receipt as failed."""
+        receipt_id = save_received(store, Path("/tmp/img.jpg"), "ios")
+        record_ocr_attempt(store, receipt_id)
+        record_ocr_attempt(store, receipt_id)
+        save_failed(store, receipt_id, "gave up")
+        meta = json.loads((Path(store) / "done" / f"{receipt_id}.json").read_text())
+        assert meta["ocr_attempts"] == 2
+        assert meta["status"] == "failed"
+        assert meta["error"] == "gave up"

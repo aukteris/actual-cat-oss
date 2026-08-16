@@ -331,3 +331,105 @@ def test_max_retries_passed_to_openai_client(monkeypatch: Any) -> None:
     profile = _text_profile()
     LLMClient(profile, max_retries=5)
     assert captured[0]["max_retries"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Timeouts
+#
+# Without a timeout the SDK default (600s) is long enough that a stalled call
+# outlives a systemd TimeoutStartSec — the process is SIGTERMed mid-call and the
+# failure never reaches the audit log.
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_seconds_passed_to_openai_client(monkeypatch: Any) -> None:
+    import actual_cat.llm as llm_mod
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_openai(**kwargs: Any) -> MagicMock:
+        captured.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(llm_mod, "OpenAI", fake_openai)
+
+    LLMClient(_text_profile(timeout_seconds=90))
+    assert captured[0]["timeout"] == 90
+
+
+def test_timeout_omitted_when_profile_leaves_it_unset(monkeypatch: Any) -> None:
+    import actual_cat.llm as llm_mod
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_openai(**kwargs: Any) -> MagicMock:
+        captured.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(llm_mod, "OpenAI", fake_openai)
+
+    LLMClient(_text_profile())
+    assert "timeout" not in captured[0]
+
+
+def test_text_and_vision_get_separate_clients_when_timeouts_differ() -> None:
+    text = _text_profile(timeout_seconds=120)
+    vision = _text_profile(timeout_seconds=300)
+    client = LLMClient(text, vision)
+    # Same endpoint and key, but the timeout is part of the cache key.
+    assert client._text_client is not client._vision_client
+
+
+def test_per_request_timeout_disables_sdk_retries() -> None:
+    """A per-request timeout must also switch off SDK retries.
+
+    The SDK retries timeouts, so timeout=180 with max_retries=2 silently means
+    540s — which defeats the point of handing OCR a deadline.
+    """
+    client = LLMClient(_text_profile())
+
+    captured: dict[str, Any] = {}
+    scoped = MagicMock()
+    scoped.chat.completions.create = lambda **kwargs: _mock_response('{"ok": true}')
+
+    def fake_with_options(**kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return scoped
+
+    client._vision_client.with_options = fake_with_options  # type: ignore[method-assign]
+
+    result = client.complete_json_vision("sys", "user", "Zm9v", "image/jpeg", timeout=45)
+    assert result == {"ok": True}
+    assert captured == {"timeout": 45, "max_retries": 0}
+
+
+def test_no_per_request_timeout_uses_the_shared_client() -> None:
+    client = LLMClient(_text_profile())
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_create(**kwargs: Any) -> MagicMock:
+        captured.append(kwargs)
+        return _mock_response('{"ok": true}')
+
+    client._vision_client.chat.completions.create = fake_create  # type: ignore[method-assign]
+
+    client.complete_json_vision("sys", "user", "Zm9v", "image/jpeg")
+    assert len(captured) == 1
+
+
+def test_timeout_error_returns_error_dict_not_raise() -> None:
+    """A timeout has to come back as {"error": ...} so __main__ can log
+    receipt_ocr_failed and move on, rather than blowing up the run."""
+    import openai
+
+    client = LLMClient(_text_profile())
+
+    def fake_create(**kwargs: Any) -> MagicMock:
+        raise openai.APITimeoutError(request=MagicMock())
+
+    client._text_client.chat.completions.create = fake_create  # type: ignore[method-assign]
+
+    result = client.complete_json("sys", "user")
+    assert "error" in result
+    assert "LLM call failure" in result["error"]

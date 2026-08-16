@@ -12,12 +12,9 @@ from .categorization import find_uncategorized, process_categorization
 from .config import load_config
 from .duplicates import process_duplicates
 from .llm import LLMClient
-from .receipts import store as receipt_store
-from .receipts.categorize import categorize_line_items
-from .receipts.extract import extract_receipt
 from .receipts.ingest import poll_email
 from .receipts.match import process_receipt_splits
-from .receipts.parse import resolve_receipt_date
+from .receipts.process import process_inbox
 from .schema import build_schema_text
 from .state import SyncState
 from .transfers import process_transfers
@@ -107,45 +104,7 @@ def main() -> None:
             else:
                 item_history = {}
             if cfg.receipts_enabled:
-                for inbox_meta in receipt_store.list_inbox(cfg.receipts_store_path):
-                    receipt_id = inbox_meta["id"]
-                    try:
-                        result = extract_receipt(inbox_meta, llm, prompts, schema_text)
-                        if "error" in result:
-                            receipt_store.save_failed(
-                                cfg.receipts_store_path, receipt_id, result["error"]
-                            )
-                            audit._write({"event": "receipt_ocr_failed", "pipeline": "receipt",
-                                          "receipt_id": receipt_id, "error": result["error"]})
-                        else:
-                            # Resolve the raw date using location-derived format
-                            # + received_ts cross-check
-                            iso_date, was_ambiguous = resolve_receipt_date(
-                                result.get("date_raw"),
-                                result.get("location_raw"),
-                                inbox_meta["received_ts"],
-                            )
-                            result["date"] = iso_date
-                            if was_ambiguous:
-                                audit._write({
-                                    "event": "receipt_date_ambiguous",
-                                    "pipeline": "receipt",
-                                    "receipt_id": receipt_id,
-                                    "resolved_date": iso_date,
-                                    "location_raw": result.get("location_raw"),
-                                })
-                            result = categorize_line_items(
-                                result, llm, prompts, schema_text, item_history, cfg
-                            )
-                            receipt_store.save_pending(cfg.receipts_store_path, receipt_id, result)
-                            audit._write({"event": "receipt_ocr_ok", "pipeline": "receipt",
-                                          "receipt_id": receipt_id,
-                                          "merchant": result.get("merchant"),
-                                          "total_cents": result.get("total_cents")})
-                    except Exception as e:
-                        receipt_store.save_failed(cfg.receipts_store_path, receipt_id, str(e))
-                        audit._write({"event": "receipt_ocr_failed", "pipeline": "receipt",
-                                      "receipt_id": receipt_id, "error": str(e)})
+                process_inbox(llm, audit, cfg, prompts, schema_text, item_history)
 
             # 5. Receipt split matching — match pending receipts to bank transactions
             if cfg.receipts_enabled:
