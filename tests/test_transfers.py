@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from actual_cat.transfers import pair_as_transfer, process_transfers
+from actual_cat.transfers import pair_as_transfer, process_transfers, repair_transfer_pairs
 
 
 def make_txn(
@@ -315,3 +315,104 @@ class TestProcessTransfers:
             process_transfers(actual, llm, audit, cfg, prompts)
 
         audit.log_failure.assert_called_once()
+
+
+class TestRepairTransferPairs:
+    """repair_transfer_pairs() re-asserts the transfer invariant that bank-sync
+    reconciliation silently breaks: payee_id/category_id are fair game to fix on
+    any paired row, but #ai-assisted is only ever restored, never added new."""
+
+    def _run(self, rows):
+        session = MagicMock()
+        chain = MagicMock()
+        chain.filter.return_value = chain
+        chain.all.return_value = rows
+        session.query.return_value = chain
+
+        actual = MagicMock()
+        actual.session = session
+        audit = MagicMock()
+
+        repaired = repair_transfer_pairs(actual, audit)
+        return repaired, audit
+
+    def test_payee_reset_is_repaired_partner_left_alone(self):
+        txn = make_txn(id="a", account_name="Checking")
+        partner = make_txn(id="b", account_name="Savings")
+        # bank sync overwrote txn's transfer payee with the imported merchant payee
+        # and stripped the marker from notes; partner is untouched.
+        txn.payee_id = "merchant-payee"
+        txn.notes = "ONLINE TRANSFER TO SAVINGS"
+        partner.payee_id = "xferpayee-Checking"
+        partner.notes = "#ai-assisted"
+        txn.transfer = partner
+
+        repaired, audit = self._run([txn])
+
+        assert repaired == 1
+        assert txn.payee_id == "xferpayee-Savings"
+        assert partner.payee_id == "xferpayee-Checking"  # unchanged
+        assert partner.notes == "#ai-assisted"  # unchanged
+        audit.log.assert_called_once()
+        assert audit.log.call_args.kwargs["action"] == "repaired"
+
+    def test_marker_not_restored_when_partner_lacks_it(self):
+        txn = make_txn(id="a", account_name="Checking")
+        partner = make_txn(id="b", account_name="Savings")
+        txn.payee_id = "merchant-payee"
+        txn.notes = "ONLINE TRANSFER TO SAVINGS"
+        partner.payee_id = "xferpayee-Checking"
+        partner.notes = None  # partner was never AI-tagged
+        txn.transfer = partner
+
+        repaired, _ = self._run([txn])
+
+        assert repaired == 1
+        assert txn.payee_id == "xferpayee-Savings"
+        assert "#ai-assisted" not in (txn.notes or "")
+
+    def test_user_made_pair_payee_repaired_but_gains_no_marker(self):
+        txn = make_txn(id="a", account_name="Checking")
+        partner = make_txn(id="b", account_name="Savings")
+        # Neither leg was ever AI-tagged — a manual transfer the user created —
+        # but bank sync still reset this leg's payee.
+        txn.payee_id = "wrong-payee"
+        txn.notes = None
+        partner.payee_id = "xferpayee-Checking"
+        partner.notes = None
+        txn.transfer = partner
+
+        repaired, _ = self._run([txn])
+
+        assert repaired == 1
+        assert txn.payee_id == "xferpayee-Savings"
+        assert "#ai-assisted" not in (txn.notes or "")
+
+    def test_healthy_pair_is_noop_and_emits_no_audit_record(self):
+        txn = make_txn(id="a", account_name="Checking")
+        partner = make_txn(id="b", account_name="Savings")
+        txn.payee_id = "xferpayee-Savings"
+        partner.payee_id = "xferpayee-Checking"
+        txn.notes = "#ai-assisted"
+        partner.notes = "#ai-assisted"
+        txn.transfer = partner
+
+        repaired, audit = self._run([txn])
+
+        assert repaired == 0
+        audit.log.assert_not_called()
+
+    def test_orphaned_partner_reported_not_repaired(self):
+        txn = make_txn(id="a", account_name="Checking")
+        txn.payee_id = "merchant-payee"  # would look damaged if it had a partner
+        txn.transferred_id = "ghost-id"
+        # Transactions.transfer is conditioned on the remote row's tombstone,
+        # so both "missing" and "tombstoned" partners surface as None here.
+        txn.transfer = None
+
+        repaired, audit = self._run([txn])
+
+        assert repaired == 0
+        assert txn.payee_id == "merchant-payee"  # untouched
+        audit.log.assert_called_once()
+        assert audit.log.call_args.kwargs["action"] == "orphaned"

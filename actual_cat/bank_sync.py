@@ -129,6 +129,16 @@ def process_bank_sync(
         accounts_synced += 1
         per_account[acct.name] = count
         state.record_account_run(PIPELINE, acct.id, now, "ok")
+        # Per-account success, mirroring bank_sync_account_failed above. The
+        # summary event's per_account map is keyed by account name, which a log
+        # store flattens into one field per account (and cannot aggregate over);
+        # one event per account keeps the account name a value, not a field name.
+        audit._write({
+            "event": "bank_sync_account_ok",
+            "pipeline": PIPELINE,
+            "account": acct.name,
+            "imported_count": count,
+        })
 
     state.set_last_run(PIPELINE, now)
     state.save()

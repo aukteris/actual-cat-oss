@@ -104,6 +104,122 @@ def pair_as_transfer(txn_a: Any, txn_b: Any) -> None:
     txn_b.category_id = None
 
 
+def expected_transfer_payee(partner: Any) -> str | None:
+    """The payee a transfer leg must carry: the *other* account's transfer payee."""
+    return partner.account.payee.id if partner.account and partner.account.payee else None
+
+
+def compute_transfer_repair(txn: Any, partner: Any) -> dict[str, Any]:
+    """Fields that must be restored on `txn` to satisfy the transfer invariant
+    with `partner`. Empty if `txn` is already healthy.
+
+    payee_id and category_id are corrected unconditionally — any transfer leg,
+    AI-paired or user-made, must carry the partner account's transfer payee and
+    no category. #ai-assisted is restored only when `partner` still carries it:
+    plenty of live pairs are user-made and were never tagged, and relabeling
+    those as agent output would misattribute them.
+    """
+    fields: dict[str, Any] = {}
+
+    expected_payee = expected_transfer_payee(partner)
+    if expected_payee is not None and txn.payee_id != expected_payee:
+        fields["payee_id"] = expected_payee
+
+    if txn.category_id is not None:
+        fields["category_id"] = None
+
+    if "#ai-assisted" in (partner.notes or "") and "#ai-assisted" not in (txn.notes or ""):
+        fields["notes"] = append_tag(txn.notes, "#ai-assisted")
+
+    return fields
+
+
+def classify_transfer_leg(txn: Any, partner: Any | None) -> tuple[str, dict[str, Any]]:
+    """Label `txn` relative to its transfer partner, alongside the repair (if any).
+
+    partner is None for both a missing and a tombstoned partner — Transactions.transfer
+    is already conditioned on the remote row's tombstone, so that distinction collapses
+    to "orphaned" here, which is correct: either way there's nothing safe to repair.
+    """
+    if partner is None:
+        return "orphaned", {}
+
+    fields = compute_transfer_repair(txn, partner)
+    if not fields:
+        return "healthy", {}
+    if "payee_id" in fields:
+        return "payee_reset", fields
+    if "category_id" in fields:
+        return "categorized", fields
+    return "marker_lost", fields
+
+
+def apply_transfer_repair(txn: Any, fields: dict[str, Any]) -> None:
+    for key, value in fields.items():
+        setattr(txn, key, value)
+
+
+def repair_transfer_pairs(actual: Any, audit: "AuditLogger") -> int:
+    """Restore what bank-sync reconciliation strips off an already-paired leg.
+
+    reconcile_transaction(update_existing=True) overwrites notes and payee_id on
+    any row the bank re-reports. On a transfer leg that silently removes the
+    transfer payee and the #ai-assisted marker while leaving transferred_id set,
+    producing a pair Actual no longer renders as a transfer and that no pipeline
+    can reach again — every row selector filters on transferred_id IS NULL.
+
+    Runs over all paired rows rather than only the rows run_bank_sync returned,
+    so it also heals damage from Actual's own server-side sync, which this
+    process never sees.
+    """
+    from actual.database import Transactions
+
+    rows = (
+        actual.session.query(Transactions)
+        .filter(Transactions.transferred_id.isnot(None), Transactions.tombstone == 0)
+        .all()
+    )
+
+    repaired = 0
+    for txn in rows:
+        label, fields = classify_transfer_leg(txn, txn.transfer)
+
+        if label == "orphaned":
+            audit.log(
+                txn, {}, mode="repair", action="orphaned", pipeline="transfer",
+                extra={"partner_id": txn.transferred_id},
+            )
+            continue
+
+        if not fields:
+            continue
+
+        apply_transfer_repair(txn, fields)
+        repaired += 1
+        audit.log(
+            txn, {}, mode="repair", action="repaired", pipeline="transfer",
+            extra={"partner_id": txn.transfer.id, "fields": sorted(fields)},
+        )
+
+    return repaired
+
+
+def partner_state(partner: Any) -> dict[str, Any]:
+    """Partner-leg fields worth recording alongside a transfer decision.
+
+    audit.log() otherwise records only the driving transaction; the partner
+    appears solely as partner_id and can never be reconstructed from the log
+    afterward. That blind spot is what let a real defect (payee/marker
+    stripped off a paired leg by bank-sync reconciliation) be mis-diagnosed as
+    a missing row, purely from absence of a log line that could never exist.
+    """
+    return {
+        "partner_payee_id": partner.payee_id,
+        "partner_category_id": partner.category_id,
+        "partner_notes": partner.notes,
+    }
+
+
 def process_transfers(
     actual: Any,
     llm: "LLMClient",
@@ -141,7 +257,8 @@ def process_transfers(
             if not is_transfer:
                 audit.log(
                     txn, response, mode="transfer-rejected", action="none",
-                    pipeline="transfer", extra={"partner_id": partner.id},
+                    pipeline="transfer",
+                    extra={"partner_id": partner.id, **partner_state(partner)},
                 )
                 continue
 
@@ -168,5 +285,6 @@ def process_transfers(
 
             audit.log(
                 txn, response, mode=cfg.transfer_mode, action=action,
-                pipeline="transfer", extra={"partner_id": partner.id},
+                pipeline="transfer",
+                extra={"partner_id": partner.id, **partner_state(partner)},
             )
