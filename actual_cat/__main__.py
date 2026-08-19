@@ -17,7 +17,7 @@ from .receipts.match import process_receipt_splits
 from .receipts.process import process_inbox
 from .schema import build_schema_text
 from .state import SyncState
-from .transfers import process_transfers
+from .transfers import process_transfers, repair_transfer_pairs
 
 
 def main() -> None:
@@ -62,6 +62,12 @@ def main() -> None:
                 audit._write({
                     "event": "bank_sync_failed", "pipeline": "bank_sync", "error": str(e)
                 })
+
+            # 0.5. Re-assert the transfer invariant every run, not just after
+            #      actual-cat's own bank sync — Actual's own server-side sync
+            #      strips the same fields and this process never otherwise sees it.
+            repair_transfer_pairs(actual, audit)
+            actual.commit()
 
             # 1. Run Actual's built-in rule engine first.
             # Guard against malformed rules (e.g. empty category ID) failing

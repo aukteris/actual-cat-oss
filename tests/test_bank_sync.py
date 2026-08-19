@@ -129,6 +129,36 @@ def test_one_account_failure_does_not_block_others(tmp_path: Path):
     assert ok_event["imported_count"] == 2
 
 
+def test_per_account_ok_event_is_written_for_each_synced_account(tmp_path: Path):
+    """One bank_sync_account_ok per account that synced — the aggregatable form
+    of the summary event's per_account map (a failed account gets no ok event)."""
+    a1, a2, a3 = (
+        make_account("acct-1", "Checking"),
+        make_account("acct-2", "Savings"),
+        make_account("acct-3", "Credit Card"),
+    )
+    error = ActualBankSyncError("ITEM_LOGIN_REQUIRED", "rejected", "expired credentials")
+    actual = make_actual(run_bank_sync_side_effect=[[MagicMock()], error, []])
+    audit = MagicMock()
+    cfg = make_cfg()
+    state = _state(tmp_path)
+
+    p1, p2 = _patched([a1, a2, a3])
+    with p1, p2:
+        process_bank_sync(actual, audit, cfg, state)
+
+    per_account_events = [
+        c.args[0]
+        for c in audit._write.call_args_list
+        if c.args[0]["event"] == "bank_sync_account_ok"
+    ]
+    assert [(e["account"], e["imported_count"]) for e in per_account_events] == [
+        ("Checking", 1),
+        ("Credit Card", 0),
+    ]
+    assert all(e["pipeline"] == "bank_sync" for e in per_account_events)
+
+
 def test_allowlist_selects_only_named_accounts(tmp_path: Path):
     a1, a2 = make_account("acct-1", "Checking"), make_account("acct-2", "Savings")
     actual = make_actual()

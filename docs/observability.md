@@ -19,15 +19,15 @@ Logstash, which parses each by `log_type` and forwards to a shared
 
 - **MCP Tool-Call Audit** — tool-call volume, calls by tool, a budget-write
   ("mutating") signal, and a recent-calls table.
-- **Categorization Monitoring** — decision volume, by pipeline/action, confidence
-  distribution, top categories, failures, and a recent-decisions table.
+- **actual-cat Worker Monitoring** — every pipeline, in six bands: run health,
+  categorization, failures, bank sync, duplicates, receipts (see Step 4).
 
 Both dashboards aggregate via **runtime keyword fields** on a dedicated data view
 (see Step 4 for why).
 
 ## Bank-sync audit events
 
-`bank_sync.py` writes four event types into the same `actual-cat.jsonl` stream as
+`bank_sync.py` writes five event types into the same `actual-cat.jsonl` stream as
 every other pipeline decision, so they need no new Filebeat input or Logstash
 filter — they arrive through the existing `actualcat-audit` path and land under
 the `actualcat.*` namespace.
@@ -35,9 +35,16 @@ the `actualcat.*` namespace.
 | Event | Fields | Meaning |
 |---|---|---|
 | `bank_sync_ok` | `accounts_synced`, `imported_count`, `per_account` | A completed sync pass (possibly zero accounts if none were due) |
+| `bank_sync_account_ok` | `account`, `imported_count` | One account synced successfully — one event per account |
 | `bank_sync_skipped` | `reason`: `disabled` \| `interval` \| `daily_cap` | The gate blocked the run before touching any account |
 | `bank_sync_account_failed` | `account`, `error_type`, `status`, `reason` | One account's `run_bank_sync()` raised `ActualBankSyncError`; other accounts still ran |
 | `bank_sync_failed` | `error` | The whole stage raised outside the per-account loop (e.g. a network-level failure) |
+
+`per_account` on the summary event is an object **keyed by account name**, which a log store
+flattens into one numeric field per account (`actualcat.per_account.Apple Card`, …) — a growing
+set of field names that no terms aggregation can bucket over. `bank_sync_account_ok` is the
+aggregatable form of the same information and is what the dashboard charts; `per_account` stays
+for `scripts/check_bank_sync.py` and eyeball reading of the raw log.
 
 **`bank_sync_account_failed` is the one worth a Kibana alert.** Expired bank
 credentials are the normal failure shape here, they're persistent (every
@@ -274,19 +281,41 @@ carrying **runtime keyword fields** computed from `_source` — e.g. `mcp_tool_k
 fields evaluate at query time, so they work on existing and future data with no
 reindex, and the dedicated view leaves any shared data view untouched.
 
+Runtime fields buy a second thing worth planning around: **they exist before the data
+does.** A pipeline that has never failed in production has no `error_type` in any index
+mapping, and a Lens column pointed at an unmapped field renders "field not found" —
+whereas the same column on a runtime field renders an honest zero and starts working
+the moment the first event lands. Define a runtime field for every dimension you want
+a panel for, not just the ones with data today.
+
 ### Dashboards
 
-Author with legacy aggregation-based visualizations (more import-robust than Lens)
-and a self-contained data view. Import via **Stack Management → Saved Objects →
-Import**.
+Build panels as **by-value Lens** objects so each panel is self-contained (no
+cross-object reference to get wrong), and keep "recent events" tables as by-reference
+saved searches. Bucket on the runtime fields; write panel *queries* against the mapped
+text fields (`actualcat.event:bank_sync_ok`), since a runtime field name in a query
+only resolves inside Kibana.
 
 1. **MCP Tool-Call Audit** — tool-call volume over time, calls by tool
    (`mcp_tool_kw`), a mutating-call metric (`mcp_mutating:true`, the budget-write
    risk signal — replaces a "top callers" panel, meaningless with a single bearer
    token), and a recent-calls table (tool / args / result status / mutating).
-2. **Categorization Monitoring** — decision volume, by pipeline
-   (`actualcat_pipeline_kw`), by action, confidence distribution, top categories, a
-   failures metric (`actualcat.event:failure`), and a recent-decisions table.
+2. **actual-cat Worker Monitoring** — six bands, one per concern:
+   - *Run health* — runs completed, last run, failures. A run that dies writes no
+     `run_complete`, so **gaps in the runs-over-time chart are the crash signal**;
+     nothing else in the log reports a failed run.
+   - *Categorization* — auto-apply rate, uncertain rate, decisions by action /
+     pipeline / account, confidence vs action, top categories.
+   - *Failures* — by pipeline and by kind, plus the category names the LLM invents
+     (each one is a schema gap worth fixing).
+   - *Bank sync* — imported volume, per-account imports (`bank_sync_account_ok`),
+     gate outcomes, and account failures.
+   - *Duplicates* — candidates, deletions, match rule, hold/refusal reasons, and the
+     posted-vs-pending delta against the configured tip band.
+   - *Receipts* — the funnel from ingest to split. Count **distinct `receipt_id`s**
+     for anything in the waiting-to-match stage: `receipt_no_match` re-fires every
+     run for the same receipt, so raw event counts overstate it by an order of
+     magnitude.
 
 ### Caveats
 
