@@ -17,7 +17,11 @@ from .receipts.match import process_receipt_splits
 from .receipts.process import process_inbox
 from .schema import build_schema_text
 from .state import SyncState
-from .transfers import process_transfers, repair_transfer_pairs
+from .transfers import (
+    process_transfers,
+    relink_recreated_transfers,
+    repair_transfer_pairs,
+)
 
 
 def main() -> None:
@@ -66,8 +70,17 @@ def main() -> None:
             # 0.5. Re-assert the transfer invariant every run, not just after
             #      actual-cat's own bank sync — Actual's own server-side sync
             #      strips the same fields and this process never otherwise sees it.
-            repair_transfer_pairs(actual, audit)
-            actual.commit()
+            #      relink first: a leg re-created by a UI sync is unpaired on
+            #      both sides, so repair_transfer_pairs() cannot see it at all.
+            try:
+                relink_recreated_transfers(actual, audit)
+                repair_transfer_pairs(actual, audit)
+                actual.commit()
+            except Exception as e:
+                print(f"WARNING: transfer repair skipped ({e})", file=sys.stderr)
+                audit._write({
+                    "event": "transfer_repair_failed", "pipeline": "transfer", "error": str(e)
+                })
 
             # 1. Run Actual's built-in rule engine first.
             # Guard against malformed rules (e.g. empty category ID) failing

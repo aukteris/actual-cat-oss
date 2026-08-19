@@ -204,6 +204,121 @@ def repair_transfer_pairs(actual: Any, audit: "AuditLogger") -> int:
     return repaired
 
 
+def find_relink_partner(
+    txn: Any,
+    live_by_id: dict[str, Any],
+    live_by_financial_id: dict[str, list[Any]],
+    tombstoned_by_financial_id: dict[str, list[Any]],
+) -> tuple[Any | None, str | None]:
+    """The leg `txn` was paired with before Actual re-created it, if that can be
+    established without guessing.
+
+    A sync triggered from the Actual UI deletes and re-creates a transaction
+    rather than reconciling it in place: the replacement row carries a new id but
+    the *same* financial_id, and the tombstoned predecessor keeps the
+    transferred_id it was paired with. That predecessor is a record of a
+    conclusion already reached, so the link can be restored deterministically
+    instead of spending another LLM call to re-derive it — and without depending
+    on the model returning the same verdict a second time.
+
+    Returns (partner, None) only when exactly one partner is implied and every
+    safety condition holds, (None, reason) on a refusal worth recording, and
+    (None, None) when there is simply nothing to relink. Ambiguity is always a
+    refusal rather than a ranked guess, as in duplicates.propose_candidates.
+    """
+    if txn.is_parent or txn.is_child:
+        return None, None
+    if txn.reconciled:
+        return None, None
+
+    predecessors = [
+        row for row in tombstoned_by_financial_id.get(txn.financial_id, [])
+        if row.transferred_id is not None and row.acct == txn.acct
+    ]
+    if not predecessors:
+        return None, None
+
+    # More than one live row on the same financial_id means we cannot tell which
+    # of them the predecessor was replaced by.
+    if len(live_by_financial_id.get(txn.financial_id, [])) > 1:
+        return None, "more than one live row shares this financial id"
+
+    implied = {row.transferred_id for row in predecessors}
+    if len(implied) > 1:
+        return None, "tombstoned predecessors disagree on the prior partner"
+
+    partner = live_by_id.get(implied.pop())
+    if partner is None:
+        return None, "prior partner is no longer live"
+    if partner.transferred_id is not None and partner.transferred_id != txn.id:
+        return None, "prior partner is already paired with another row"
+    if partner.acct == txn.acct:
+        return None, "prior partner is in the same account"
+    if partner.amount != -txn.amount:
+        return None, "amounts are no longer inverse"
+    if partner.is_parent or partner.is_child or partner.reconciled:
+        return None, "prior partner is a split or has been reconciled"
+
+    return partner, None
+
+
+def relink_recreated_transfers(actual: Any, audit: "AuditLogger") -> int:
+    """Restore pairings that a UI-triggered sync broke by re-creating a leg.
+
+    repair_transfer_pairs() cannot see this case: the replacement row and its
+    former partner both have transferred_id NULL, so neither is a paired row any
+    more. Left alone the pair is eventually rebuilt by process_transfers at the
+    cost of a fresh LLM call, and only if the model again returns exactly the
+    configured confidence — a "medium" verdict would instead tag the row
+    #ai-suggested-transfer, which excludes it from find_uncategorized for good.
+    Relinking deterministically removes both the cost and that failure mode.
+    """
+    from actual.database import Transactions
+
+    rows = actual.session.query(Transactions).all()
+
+    live_by_id: dict[str, Any] = {}
+    live_by_financial_id: dict[str, list[Any]] = {}
+    tombstoned_by_financial_id: dict[str, list[Any]] = {}
+    for row in rows:
+        if row.tombstone:
+            if row.financial_id:
+                tombstoned_by_financial_id.setdefault(row.financial_id, []).append(row)
+            continue
+        live_by_id[row.id] = row
+        if row.financial_id:
+            live_by_financial_id.setdefault(row.financial_id, []).append(row)
+
+    relinked = 0
+    for txn in live_by_id.values():
+        if txn.transferred_id is not None or not txn.financial_id:
+            continue
+
+        partner, reason = find_relink_partner(
+            txn, live_by_id, live_by_financial_id, tombstoned_by_financial_id
+        )
+        if partner is None:
+            if reason:
+                audit.log(
+                    txn, {}, mode="repair", action="relink-refused",
+                    pipeline="transfer", extra={"reason": reason},
+                )
+            continue
+
+        pair_as_transfer(txn, partner)
+        # Reuse the shared rules for the marker so relink and repair cannot
+        # disagree about when #ai-assisted may be added.
+        apply_transfer_repair(txn, compute_transfer_repair(txn, partner))
+        apply_transfer_repair(partner, compute_transfer_repair(partner, txn))
+        relinked += 1
+        audit.log(
+            txn, {}, mode="repair", action="relinked", pipeline="transfer",
+            extra={"partner_id": partner.id, "via_financial_id": txn.financial_id},
+        )
+
+    return relinked
+
+
 def partner_state(partner: Any) -> dict[str, Any]:
     """Partner-leg fields worth recording alongside a transfer decision.
 
