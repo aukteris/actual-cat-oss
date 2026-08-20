@@ -3,14 +3,18 @@
 Called from the hourly worker (__main__.py) when email.enabled = true.
 Credentials come from IMAP_PASSWORD env var; all other config from Config.
 
-Supported attachment types mirror the receiver's _ALLOWED_TYPES.
+Supported image types mirror the receiver's _ALLOWED_TYPES. PDF is additionally
+accepted here (the receiver does not accept it — see receiver.py:_ALLOWED_TYPES).
 """
 
 from __future__ import annotations
 
 import email
 import imaplib
+import json
 import os
+import uuid
+from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,18 +32,58 @@ _ALLOWED_EXTENSIONS = {
     "image/heic": ".heic",
     "image/heif": ".heif",
 }
+_PDF_CONTENT_TYPE = "application/pdf"
+_PDF_EXTENSION = ".pdf"
+# Body representations, not attachments: a multipart/alternative message
+# carries the same body as both, and reporting the unused half as "skipped"
+# would fire on ordinary mail and drown out a genuinely discarded attachment.
+_BODY_CONTENT_TYPES = {"text/plain", "text/html"}
 
 
-def _image_attachments(msg: Message) -> list[tuple[bytes, str]]:
-    """Return (payload_bytes, ext) for each image attachment in the message."""
-    results = []
+def _attachments(msg: Message) -> list[tuple[bytes, str, str]]:
+    """Return (payload_bytes, ext, input_kind) for each image or PDF attachment.
+
+    Matched on content type only, never Content-Disposition: emailed receipt
+    PDFs (e.g. from an iOS share sheet) commonly arrive as "inline" rather than
+    "attachment", and a disposition check would silently reject them exactly
+    like the missing PDF content-type match once did.
+    """
+    results: list[tuple[bytes, str, str]] = []
     for part in msg.walk():
         ct = (part.get_content_type() or "").lower()
         if ct in _ALLOWED_EXTENSIONS:
             payload = part.get_payload(decode=True)
             if isinstance(payload, bytes):
-                results.append((payload, _ALLOWED_EXTENSIONS[ct]))
+                results.append((payload, _ALLOWED_EXTENSIONS[ct], "image"))
+        elif ct == _PDF_CONTENT_TYPE:
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                results.append((payload, _PDF_EXTENSION, "pdf"))
     return results
+
+
+def _skipped_content_types(msg: Message) -> list[str]:
+    """Content types of leaf parts that are neither a supported attachment nor
+    a representation of the message body, in message order with duplicates
+    removed.
+
+    Used only on the body-fallback path, so a discarded attachment type
+    announces itself instead of silently becoming the stored receipt.
+    """
+    skipped: list[str] = []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        ct = (part.get_content_type() or "").lower()
+        if ct in _ALLOWED_EXTENSIONS or ct == _PDF_CONTENT_TYPE:
+            continue
+        if ct in _BODY_CONTENT_TYPES and (
+            part.get_content_disposition() or ""
+        ).lower() != "attachment":
+            continue
+        if ct not in skipped:
+            skipped.append(ct)
+    return skipped
 
 
 def _text_body(msg: Message) -> str | None:
@@ -68,9 +112,9 @@ def _text_body(msg: Message) -> str | None:
 
 
 def poll_email(cfg: "Config", audit: "AuditLogger") -> int:
-    """Poll the configured IMAP mailbox for unseen messages with image attachments.
+    """Poll the configured IMAP mailbox for unseen messages with image/PDF attachments.
 
-    Returns the number of receipt images saved to inbox.
+    Returns the number of receipt attachments (or text-body fallbacks) saved to inbox.
     """
     password = os.environ.get("IMAP_PASSWORD", "")
     if not password:
@@ -92,29 +136,26 @@ def poll_email(cfg: "Config", audit: "AuditLogger") -> int:
                     continue
 
                 msg = email.message_from_bytes(raw)  # type: ignore[arg-type]
-                attachments = _image_attachments(msg)
+                attachments = _attachments(msg)
                 subject = msg.get("Subject", "(no subject)")
                 sender = msg.get("From", "(unknown)")
                 email_extra = {"email_from": sender, "email_subject": subject}
 
                 if attachments:
-                    import json
-                    import uuid
-                    from datetime import datetime, timezone
-
-                    for image_bytes, ext in attachments:
+                    for payload_bytes, ext, kind in attachments:
                         receipt_id = uuid.uuid4().hex
                         receipt_store._store_root(cfg.receipts_store_path)
-                        image_path = Path(cfg.receipts_store_path) / "inbox" / f"{receipt_id}{ext}"
-                        image_path.write_bytes(image_bytes)
+                        file_path = Path(cfg.receipts_store_path) / "inbox" / f"{receipt_id}{ext}"
+                        file_path.write_bytes(payload_bytes)
 
+                        path_key = "image_path" if kind == "image" else "pdf_path"
                         meta = {
                             "id": receipt_id,
                             "status": "received",
                             "source": "email",
-                            "input_kind": "image",
+                            "input_kind": kind,
                             "received_ts": datetime.now(timezone.utc).isoformat(),
-                            "image_path": str(image_path),
+                            path_key: str(file_path),
                             **email_extra,
                         }
                         (Path(cfg.receipts_store_path) / "inbox" / f"{receipt_id}.json").write_text(
@@ -125,13 +166,24 @@ def poll_email(cfg: "Config", audit: "AuditLogger") -> int:
                             "event": "receipt_email_ingested",
                             "pipeline": "receipt",
                             "receipt_id": receipt_id,
-                            "input_kind": "image",
+                            "input_kind": kind,
                             **email_extra,
                         })
                         saved += 1
                 else:
-                    # No image attachment — fall back to the plain-text body as
-                    # a text receipt. Emails with neither are just marked seen.
+                    # No image/PDF attachment. Announce anything discarded before
+                    # falling back to the plain-text body as a text receipt —
+                    # otherwise a silently-dropped attachment type looks identical
+                    # to someone genuinely emailing a bare signature.
+                    skipped_types = _skipped_content_types(msg)
+                    if skipped_types:
+                        audit._write({
+                            "event": "receipt_email_attachment_skipped",
+                            "pipeline": "receipt",
+                            "content_types": skipped_types,
+                            **email_extra,
+                        })
+
                     body = _text_body(msg)
                     if body:
                         receipt_id = receipt_store.save_received_text(

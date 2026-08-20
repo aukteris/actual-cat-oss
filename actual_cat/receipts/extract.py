@@ -21,6 +21,12 @@ from .text import parse_receipt_text
 if TYPE_CHECKING:
     from ..llm import LLMClient
 
+# A PDF text layer shorter than this is a caption or a stray label around an
+# image, not a receipt — the shortest plausible receipt still names a merchant,
+# a date and a total. Below the threshold the embedded image is the real
+# content, so vision OCR gets it.
+MIN_PDF_TEXT_CHARS = 40
+
 
 def _extract_image(
     meta: dict[str, Any],
@@ -47,6 +53,70 @@ def _extract_image(
     )
 
 
+def _extract_pdf(
+    meta: dict[str, Any],
+    llm: "LLMClient",
+    prompts: Any,
+    schema_text: str,
+    *,
+    request_timeout_seconds: float | None,
+    budget_seconds: float | None,
+    autocrop: bool,
+) -> dict[str, Any]:
+    """Route a PDF receipt to the text parser or to vision OCR.
+
+    A real text layer wins over an embedded image. Merchant-generated PDF
+    receipts are text plus a logo, and OCRing the logo would throw away the
+    merchant and total sitting right there in the text. Only a PDF whose text
+    is absent or too short to be a receipt — the jsPDF share-sheet exports that
+    prompted this path are one page, one image, no text at all — falls through
+    to the same vision OCR used for photographed receipts.
+
+    pypdf (not a rasterizer) enumerates page images so both DCTDecode (already
+    a JPEG, used as-is) and FlateDecode (re-encoded by pypdf) streams work.
+    """
+    pdf_path = meta.get("pdf_path", "")
+    if not pdf_path:
+        return {"error": "pdf receipt missing pdf_path"}
+
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(pdf_path)
+        image_bytes: bytes | None = None
+        text_parts: list[str] = []
+        for page in reader.pages:
+            if image_bytes is None:
+                for img in page.images:
+                    image_bytes = img.data
+                    break
+            page_text = page.extract_text() or ""
+            if page_text.strip():
+                text_parts.append(page_text)
+    except Exception as e:
+        return {"error": f"failed to read PDF: {e}"}
+
+    text = "\n".join(text_parts).strip()
+    if len(text) >= MIN_PDF_TEXT_CHARS:
+        return parse_receipt_text(text, llm, prompts.RECEIPT_TEXT_SYSTEM, schema_text)
+
+    if image_bytes is not None:
+        return ocr_receipt(
+            image_bytes,
+            llm,
+            prompts.RECEIPT_OCR_SYSTEM,
+            schema_text,
+            request_timeout_seconds=request_timeout_seconds,
+            budget_seconds=budget_seconds,
+            autocrop=autocrop,
+        )
+
+    if text:
+        return parse_receipt_text(text, llm, prompts.RECEIPT_TEXT_SYSTEM, schema_text)
+
+    return {"error": "PDF receipt has no extractable image or text"}
+
+
 def _extract_text(
     meta: dict[str, Any],
     llm: "LLMClient",
@@ -66,6 +136,7 @@ def _extract_text(
 _EXTRACTORS = {
     "image": _extract_image,
     "text": _extract_text,
+    "pdf": _extract_pdf,
 }
 
 

@@ -233,13 +233,16 @@ def compute_confidence(items: list[dict[str, Any]], total_cents: int) -> tuple[s
     return "low", abs(diff)
 
 
-def validate_receipt(data: dict[str, Any]) -> dict[str, Any]:
+def validate_receipt(data: Any) -> dict[str, Any]:
     """Validate required fields, score confidence, optionally nudge for rounding.
 
     - Negative amount_cents are allowed (discounts/credits).
     - Null/non-int amount_cents are kept as None (unreadable) — they force low confidence.
-    - Raises ValueError only on structurally invalid responses.
+    - Raises ValueError only on structurally invalid responses, including a
+      non-dict `data` (e.g. an LLM response of bare `null`).
     """
+    if not isinstance(data, dict):
+        raise ValueError(f"non-object LLM response: {data!r}")
     if "error" in data:
         raise ValueError(data["error"])
 

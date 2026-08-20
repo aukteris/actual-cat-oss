@@ -268,6 +268,37 @@ def test_code_fence_stripped_before_json_parse() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Non-dict JSON response (e.g. a bare `null`) must not reach callers as None —
+# validate_receipt/downstream code assumes a dict and would raise TypeError.
+# ---------------------------------------------------------------------------
+
+
+def test_null_json_response_becomes_error_dict() -> None:
+    profile = _text_profile()
+    client = LLMClient(profile)
+
+    def fake_create(**kwargs: Any) -> MagicMock:
+        return _mock_response("null")
+
+    client._text_client.chat.completions.create = fake_create  # type: ignore[method-assign]
+    result = client.complete_json("s", "u")
+    assert "error" in result
+    assert "None" in result["error"]
+
+
+def test_json_array_response_becomes_error_dict() -> None:
+    profile = _text_profile()
+    client = LLMClient(profile)
+
+    def fake_create(**kwargs: Any) -> MagicMock:
+        return _mock_response("[1, 2, 3]")
+
+    client._text_client.chat.completions.create = fake_create  # type: ignore[method-assign]
+    result = client.complete_json("s", "u")
+    assert "error" in result
+
+
+# ---------------------------------------------------------------------------
 # Rate limiting: client-side throttle + SDK max_retries
 # ---------------------------------------------------------------------------
 

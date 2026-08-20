@@ -133,6 +133,15 @@ class TestValidateReceipt:
         with pytest.raises(ValueError, match="timeout"):
             validate_receipt({"error": "LLM call failure: timeout"})
 
+    def test_none_data_raises_cleanly(self):
+        """A bare `null` LLM response must raise ValueError, not TypeError."""
+        with pytest.raises(ValueError, match="non-object"):
+            validate_receipt(None)
+
+    def test_list_data_raises_cleanly(self):
+        with pytest.raises(ValueError, match="non-object"):
+            validate_receipt([1, 2, 3])
+
     def test_missing_merchant_raises(self):
         with pytest.raises(ValueError):
             validate_receipt(self._good(merchant=""))
