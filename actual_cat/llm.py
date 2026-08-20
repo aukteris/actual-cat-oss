@@ -135,7 +135,10 @@ class LLMClient:
                 self._throttle()
                 resp = client.chat.completions.create(**kwargs)
                 content = _CODE_FENCE_RE.sub("", resp.choices[0].message.content or "").strip()
-                return json.loads(content)  # type: ignore[no-any-return]
+                parsed = json.loads(content)
+                if not isinstance(parsed, dict):
+                    return {"error": f"LLM returned non-object JSON: {parsed!r}"}
+                return parsed
             except json.JSONDecodeError as e:
                 last_err = {"error": f"JSON parse failure: {e}", "raw": content}
             except Exception as e:

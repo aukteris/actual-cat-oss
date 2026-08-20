@@ -13,3 +13,7 @@ logs/
 *.egg-info/
 dist/
 .DS_Store
+
+# Real receipts pulled from the mailbox for local verification — never commit
+# these: this repo is public and they are personal financial records.
+tests/fixtures/pdf/real_*.pdf
