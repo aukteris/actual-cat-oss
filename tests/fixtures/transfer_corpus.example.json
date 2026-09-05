@@ -1,0 +1,35 @@
+{
+  "_comment": "Synthetic corpus. Same shape as a real one, invented accounts and amounts, safe to commit. Point --corpus at a real file kept outside this repo for a meaningful run; see the module docstring in scripts/validate_transfer_verdicts.py.",
+  "cases": [
+    {
+      "label": "cc-payment, card leg driving",
+      "expect": true,
+      "a": {"account": "Example Card (1234)", "date": "2026-04-02", "descriptor": "Payment", "amount": 51200},
+      "b": {"account": "Example Checking", "date": "2026-04-01", "descriptor": "Online Payment To Example Card 1234", "amount": -51200}
+    },
+    {
+      "label": "cc-payment, checking leg driving",
+      "expect": true,
+      "a": {"account": "Example Checking", "date": "2026-04-10", "descriptor": "External Withdrawal Example Bank - Payment", "amount": -138400},
+      "b": {"account": "Example Rewards Card", "date": "2026-04-11", "descriptor": "ACH DEPOSIT INTERNET TRANSFER FROM ACCOUNT ENDING IN 0000", "amount": 138400}
+    },
+    {
+      "label": "checking -> savings",
+      "expect": true,
+      "a": {"account": "Example Savings", "date": "2026-04-01", "descriptor": "RECURRING TRANSFER FROM EXAMPLE CHECKING", "amount": 25000},
+      "b": {"account": "Example Checking", "date": "2026-04-01", "descriptor": "RECURRING TRANSFER TO SAVINGS", "amount": -25000}
+    },
+    {
+      "label": "NEG off-budget loan payment",
+      "expect": false,
+      "a": {"account": "Example Auto Loan", "date": "2026-04-08", "descriptor": "Payment", "amount": 45000, "offbudget": true},
+      "b": {"account": "Example Checking", "date": "2026-04-08", "descriptor": "LOAN PYMT AUTO FINANCE", "amount": -45000}
+    },
+    {
+      "label": "NEG merchant amount coincidence",
+      "expect": false,
+      "a": {"account": "Example Card (1234)", "date": "2026-04-20", "descriptor": "EXAMPLE COFFEE ROASTERS", "amount": -1850},
+      "b": {"account": "Example Rewards Card", "date": "2026-04-20", "descriptor": "EXAMPLE OUTFITTERS REFUND", "amount": 1850}
+    }
+  ]
+}

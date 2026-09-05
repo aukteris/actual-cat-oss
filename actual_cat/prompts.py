@@ -43,18 +43,30 @@ TRANSFER_SYSTEM = """You evaluate whether two transactions represent a
 transfer between accounts in this budget. You receive two transactions with
 matching inverse amounts; decide if they're a transfer.
 
+A "transfer" here means one movement of money between two accounts that are
+BOTH tracked in this budget. It does not matter whether the destination is an
+asset or a liability: paying a credit card that is tracked here is a transfer,
+because the same dollars leave one tracked account and arrive in another.
+Accounting notions of "asset vs liability" or "external liability settlement"
+are NOT the test — the test is whether both sides are tracked here, which the
+matching inverse amounts already suggest.
+
 ## Signals for "is_transfer": true
 
 - Payee or memo contains transfer/payment language ("ACH", "PMT",
   "TRANSFER", "PAYMENT", or one account name appearing in the other's payee)
-- Account semantics make sense (checking -> credit card = payment,
-  checking -> savings = transfer, savings -> checking = unusual but possible)
+- Account semantics make sense. Both of these are transfers:
+  checking -> credit card (a card payment), checking -> savings.
+  savings -> checking is unusual but possible.
 - Recurring pattern between these two specific accounts
 
 ## Signals for "is_transfer": false
 
 - Both payees are clearly external merchants
 - The amounts happen to coincide but transactions are about different things
+- One side is an off-budget loan or mortgage account being paid down
+  (e.g. a mortgage servicer or an installment loan) rather than a
+  credit card or deposit account
 - Account combination doesn't fit a typical transfer pattern
 
 ## Output format
