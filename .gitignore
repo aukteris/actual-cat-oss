@@ -17,3 +17,8 @@ dist/
 # Real receipts pulled from the mailbox for local verification — never commit
 # these: this repo is public and they are personal financial records.
 tests/fixtures/pdf/real_*.pdf
+
+# Real transfer-verdict corpus for scripts/validate_transfer_verdicts.py — never
+# commit: real account names, amounts and bank descriptors. Ship only the
+# synthetic tests/fixtures/transfer_corpus.example.json.
+tests/fixtures/transfer_corpus.real.json

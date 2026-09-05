@@ -79,9 +79,10 @@ Transaction B:
 - Raw descriptor: {clean_notes(txn_b)}
 - Amount: {txn_b.amount / 100:+.2f} USD
 
-Is this a transfer between accounts? Consider account semantics
-(checking -> credit card is usually a card payment, checking -> savings
-is a transfer), payee/memo content, and date alignment.
+Is this a transfer between accounts? Consider account semantics (a card
+payment from checking to a credit card tracked in this budget is a transfer,
+as is checking -> savings; paying an off-budget loan or an external merchant
+is not), payee/memo content, and date alignment.
 
 Return JSON.
 """
