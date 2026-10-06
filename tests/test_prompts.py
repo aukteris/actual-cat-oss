@@ -85,6 +85,49 @@ class TestRenderTransferPrompt:
         assert "(none)" in text
 
 
+class TestRenderTransferChoicePrompt:
+    def test_driving_row_and_every_candidate_present_and_lettered(self):
+        from actual_cat.transfers import render_transfer_choice_prompt
+
+        txn = make_txn(imported_description="Scheduled Transfer", amount=2500,
+                       account_name="Bank B Savings", notes="Start Scheduled Transfer Deposit")
+        cand_a = make_txn(imported_description="Recurring Transfer", amount=-2500,
+                          account_name="Bank A Checking", notes="TRANSFER TO SAVINGS REF #X1")
+        cand_b = make_txn(imported_description="Scheduled Transfer", amount=-2500,
+                          account_name="Bank B Checking", notes="Start Scheduled Transfer")
+        text = render_transfer_choice_prompt(txn, [cand_a, cand_b])
+        assert "2 transactions" in text
+        assert "Bank B Savings" in text
+        assert "Candidate A:\n- Account: Bank A Checking" in text
+        assert "Candidate B:\n- Account: Bank B Checking" in text
+        assert "REF #X1" in text
+        assert "+25.00" in text
+        assert "-25.00" in text
+
+    def test_ai_markers_are_hidden_from_the_model(self):
+        from actual_cat.transfers import render_transfer_choice_prompt
+
+        txn = make_txn(amount=2500, notes="#ai-suggested-transfer Deposit")
+        cand = make_txn(amount=-2500, notes="Withdrawal")
+        text = render_transfer_choice_prompt(txn, [cand, cand])
+        assert "#ai-" not in text
+        assert "- Raw descriptor: Deposit" in text
+
+
+class TestTransferChoiceSystemPrompt:
+    def test_offers_ambiguous_as_an_answer(self):
+        # The hold is only reachable if the model knows it may return it.
+        from actual_cat.prompts import TRANSFER_CHOICE_SYSTEM
+
+        assert '"ambiguous"' in TRANSFER_CHOICE_SYSTEM
+        assert '"none"' in TRANSFER_CHOICE_SYSTEM
+
+    def test_names_same_institution_as_the_tie_break(self):
+        from actual_cat.prompts import TRANSFER_CHOICE_SYSTEM
+
+        assert "Same institution" in TRANSFER_CHOICE_SYSTEM
+
+
 class TestDuplicateSystemPrompt:
     """The two things the prompt exists to teach, learned from live runs."""
 

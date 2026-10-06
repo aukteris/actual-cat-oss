@@ -20,8 +20,10 @@ or user-made. #ai-assisted is restored only when the partner leg still
 carries it, so a manual transfer (never tagged on either side) is repaired
 without being mislabeled as agent output.
 
-Orphaned rows (partner missing or tombstoned) are reported, never touched —
-that needs a human decision, not an automatic rewrite.
+Orphaned rows (partner missing or tombstoned) and non-reciprocal rows (the
+partner links to a third row, ISSUE-028) are reported, never touched — that
+needs a human decision, not an automatic rewrite. A dry run doubles as a
+budget-wide reciprocity check.
 
 Read-only by default; nothing is written and actual.commit() is never called
 unless --apply is passed.
@@ -48,7 +50,9 @@ from dotenv import load_dotenv  # noqa: E402
 
 from actual_cat.transfers import apply_transfer_repair, classify_transfer_leg  # noqa: E402
 
-LABELS = ("healthy", "payee_reset", "marker_lost", "categorized", "orphaned")
+LABELS = (
+    "healthy", "payee_reset", "marker_lost", "categorized", "orphaned", "non_reciprocal",
+)
 
 
 def row_report(txn: Any, partner: Any | None, fields: dict[str, Any]) -> dict[str, Any]:
@@ -60,6 +64,7 @@ def row_report(txn: Any, partner: Any | None, fields: dict[str, Any]) -> dict[st
         "current_payee_id": txn.payee_id,
         "target_payee_id": fields.get("payee_id", txn.payee_id),
         "partner_id": partner.id if partner is not None else txn.transferred_id,
+        "partner_transferred_id": partner.transferred_id if partner is not None else None,
     }
 
 
@@ -127,6 +132,7 @@ def main() -> int:
             "counts": {label: len(by_label[label]) for label in LABELS},
             "rows": affected,
             "orphaned_rows": by_label["orphaned"],
+            "non_reciprocal_rows": by_label["non_reciprocal"],
         }
 
         if args.json:
@@ -162,6 +168,17 @@ def main() -> int:
                 print(
                     f"    {row['id']:<38} {(row['account'] or '')[:24]:<24} {row['date']:<12} "
                     f"partner={row['partner_id']}"
+                )
+
+        if by_label["non_reciprocal"]:
+            print(
+                f"\n  Non-reciprocal ({len(by_label['non_reciprocal'])}) — partner links to "
+                "a third row, needs a human decision, not touched:"
+            )
+            for row in by_label["non_reciprocal"]:
+                print(
+                    f"    {row['id']:<38} {(row['account'] or '')[:24]:<24} {row['date']:<12} "
+                    f"partner={row['partner_id']} -> {row['partner_transferred_id']}"
                 )
 
         if not args.apply and affected:

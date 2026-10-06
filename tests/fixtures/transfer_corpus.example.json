@@ -30,6 +30,46 @@
       "expect": false,
       "a": {"account": "Example Card (1234)", "date": "2026-04-20", "descriptor": "EXAMPLE COFFEE ROASTERS", "amount": -1850},
       "b": {"account": "Example Rewards Card", "date": "2026-04-20", "descriptor": "EXAMPLE OUTFITTERS REFUND", "amount": 1850}
+    },
+    {
+      "kind": "choice",
+      "label": "CHOICE two banks same day, savings leg driving",
+      "expect": "B",
+      "driving": {"account": "Sample Credit Union Savings", "date": "2026-04-01", "descriptor": "Start Scheduled Transfer Deposit", "amount": 2500, "payee": "Scheduled Transfer"},
+      "candidates": [
+        {"account": "Example Bank Checking", "date": "2026-04-01", "descriptor": "RECURRING TRANSFER TO SAVINGS REF #AB12CD XXXXXX1111", "amount": -2500, "payee": "Recurring Transfer to Savings"},
+        {"account": "Sample Credit Union Checking", "date": "2026-04-01", "descriptor": "Start Scheduled Transfer", "amount": -2500, "payee": "Scheduled Transfer"}
+      ]
+    },
+    {
+      "kind": "choice",
+      "label": "CHOICE two banks same day, checking leg driving",
+      "expect": "A",
+      "driving": {"account": "Example Bank Checking", "date": "2026-04-01", "descriptor": "RECURRING TRANSFER TO SAVINGS REF #AB12CD XXXXXX1111", "amount": -2500, "payee": "Recurring Transfer to Savings"},
+      "candidates": [
+        {"account": "Example Bank Savings", "date": "2026-04-01", "descriptor": "RECURRING TRANSFER FROM CHECKING REF #AB12CD XXXXXX2222", "amount": 2500, "payee": "Recurring Transfer from Checking"},
+        {"account": "Sample Credit Union Savings", "date": "2026-04-01", "descriptor": "Start Scheduled Transfer Deposit", "amount": 2500, "payee": "Scheduled Transfer"}
+      ]
+    },
+    {
+      "kind": "choice",
+      "label": "CHOICE NEG merchant coincidences",
+      "expect": "none",
+      "driving": {"account": "Example Card (1234)", "date": "2026-04-20", "descriptor": "EXAMPLE OUTFITTERS REFUND", "amount": 1850},
+      "candidates": [
+        {"account": "Example Rewards Card", "date": "2026-04-20", "descriptor": "EXAMPLE COFFEE ROASTERS", "amount": -1850},
+        {"account": "Example Checking", "date": "2026-04-21", "descriptor": "EXAMPLE BOOKSHOP #44", "amount": -1850}
+      ]
+    },
+    {
+      "kind": "choice",
+      "label": "CHOICE indistinguishable candidates",
+      "expect": "ambiguous",
+      "driving": {"account": "Example Checking", "date": "2026-04-15", "descriptor": "ONLINE TRANSFER", "amount": -10000},
+      "candidates": [
+        {"account": "Example Savings (Goal 1)", "date": "2026-04-15", "descriptor": "ONLINE TRANSFER", "amount": 10000},
+        {"account": "Example Savings (Goal 2)", "date": "2026-04-15", "descriptor": "ONLINE TRANSFER", "amount": 10000}
+      ]
     }
   ]
 }
