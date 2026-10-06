@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from actual_cat.transfers import (
     pair_as_transfer,
     process_transfers,
@@ -86,6 +88,29 @@ class TestPairAsTransfer:
         pair_as_transfer(a, b)
         assert a.category_id is None
         assert b.category_id is None
+
+    def test_refuses_to_overwrite_a_link_to_a_third_row(self):
+        a = make_txn(id="a", transferred_id="c")
+        b = make_txn(id="b")
+        with pytest.raises(ValueError, match="already linked"):
+            pair_as_transfer(a, b)
+        # nothing was half-written
+        assert a.transferred_id == "c"
+        assert b.transferred_id is None
+
+    def test_refuses_when_the_partner_is_linked_elsewhere(self):
+        a = make_txn(id="a")
+        b = make_txn(id="b", transferred_id="c")
+        with pytest.raises(ValueError, match="already linked"):
+            pair_as_transfer(a, b)
+        assert a.transferred_id is None
+
+    def test_reasserting_an_existing_link_is_allowed(self):
+        a = make_txn(id="a", transferred_id="b")
+        b = make_txn(id="b", transferred_id="a")
+        pair_as_transfer(a, b)
+        assert a.transferred_id == "b"
+        assert b.transferred_id == "a"
 
 
 class TestFindTransferCandidates:
@@ -328,6 +353,224 @@ class TestProcessTransfers:
         audit.log_failure.assert_called_once()
 
 
+class ApproveEverythingLLM:
+    """Says yes to every pair and picks the first of every choice.
+
+    That is what the model did on 2026-10-03: two same-day transfers at two
+    banks, every cross-bank pairing judged a transfer at high confidence.
+    """
+
+    def __init__(self, choice="A", confidence="high"):
+        self.choice = choice
+        self.confidence = confidence
+        self.calls: list[tuple[str, str]] = []
+
+    def complete_json(self, system: str, user: str) -> dict:
+        import actual_cat.prompts as prompts
+
+        self.calls.append((system, user))
+        if system == prompts.TRANSFER_CHOICE_SYSTEM:
+            return {"choice": self.choice, "confidence": self.confidence, "reasoning": "x"}
+        return {"is_transfer": True, "confidence": self.confidence, "reasoning": "x"}
+
+
+def live_candidates(rows):
+    """A find_transfer_candidates stand-in that re-reads row state on every call,
+    so a row linked earlier in the run drops out like it does under autoflush."""
+
+    def find(session, txn, window_days, defer_pending=False):
+        return [
+            r for r in rows
+            if r.id != txn.id
+            and r.amount == -txn.amount
+            and r.acct != txn.acct
+            and r.transferred_id is None
+        ]
+
+    return find
+
+
+def two_banks_same_day():
+    """The ISSUE-028 shape: a $25 checking -> savings transfer at each of two banks."""
+    a_chk = make_txn(id="a-chk", amount=-2500, acct="a-chk", account_name="Bank A Checking",
+                     notes="RECURRING TRANSFER TO SAVINGS REF #X1")
+    a_sav = make_txn(id="a-sav", amount=2500, acct="a-sav", account_name="Bank A Savings",
+                     notes="RECURRING TRANSFER FROM CHECKING REF #X1")
+    b_chk = make_txn(id="b-chk", amount=-2500, acct="b-chk", account_name="Bank B Checking",
+                     notes="Start Scheduled Transfer")
+    b_sav = make_txn(id="b-sav", amount=2500, acct="b-sav", account_name="Bank B Savings",
+                     notes="Start Scheduled Transfer Deposit")
+    return a_chk, a_sav, b_chk, b_sav
+
+
+class TestTransferChaining:
+    """ISSUE-028: two same-amount transfers eligible in one run were chained across
+    banks, because a row could be re-paired and candidates were judged one pair at
+    a time with the first plausible one winning."""
+
+    def _run(self, driving, rows, llm, mode="apply"):
+        import actual_cat.prompts as prompts
+
+        audit = MagicMock()
+        cfg = MagicMock()
+        cfg.transfer_mode = mode
+        cfg.transfer_threshold = "high"
+        cfg.transfer_window_days = 3
+        cfg.duplicates_defer_pending = False
+        actual = MagicMock()
+
+        with (
+            patch("actual_cat.categorization.get_transactions", return_value=driving),
+            patch("actual_cat.transfers.find_transfer_candidates",
+                  side_effect=live_candidates(rows)),
+        ):
+            process_transfers(actual, llm, audit, cfg, prompts)
+        return audit
+
+    def test_two_banks_same_day_never_overwrites_a_link(self):
+        rows = two_banks_same_day()
+        b_sav = rows[3]
+        # Drive from the row that went first on 10-03, then everything else.
+        driving = [b_sav, *rows[:3]]
+
+        audit = self._run(driving, rows, ApproveEverythingLLM())
+
+        audit.log_failure.assert_not_called()
+        linked = [r for r in rows if r.transferred_id is not None]
+        assert linked, "something should have been paired"
+        by_id = {r.id: r for r in rows}
+        for row in linked:
+            # every link is reciprocal: no A→B→C chains
+            assert by_id[row.transferred_id].transferred_id == row.id
+        # One "paired" per surviving pair. An extra one means a link was written
+        # and later overwritten — pre-fix, this exact input logged 3 pairings for
+        # 2 surviving pairs, and only happened to end reciprocal.
+        paired = [c for c in audit.log.call_args_list if c.kwargs["action"] == "paired"]
+        assert len(paired) == len(linked) // 2
+
+    def test_row_paired_as_a_partner_is_not_driven_again(self):
+        a = make_txn(id="a", amount=-2500, acct="chk")
+        b = make_txn(id="b", amount=2500, acct="sav")
+        c = make_txn(id="c", amount=-2500, acct="other")
+        # b is a's only candidate when a drives; c joins b's list only later.
+        llm = ApproveEverythingLLM()
+
+        def find(session, txn, window_days, defer_pending=False):
+            if txn.id == "a":
+                return [b]
+            return [r for r in (a, c) if r.transferred_id is None]
+
+        import actual_cat.prompts as prompts
+        cfg = MagicMock(transfer_mode="apply", transfer_threshold="high",
+                        transfer_window_days=3, duplicates_defer_pending=False)
+        with (
+            patch("actual_cat.categorization.get_transactions", return_value=[a, b]),
+            patch("actual_cat.transfers.find_transfer_candidates", side_effect=find),
+        ):
+            process_transfers(MagicMock(), llm, MagicMock(), cfg, prompts)
+
+        assert a.transferred_id == "b"
+        assert b.transferred_id == "a"
+        assert c.transferred_id is None
+        assert len(llm.calls) == 1
+
+    def test_single_candidate_keeps_the_pairwise_prompt(self):
+        import actual_cat.prompts as prompts
+
+        a = make_txn(id="a", amount=-2500, acct="chk")
+        b = make_txn(id="b", amount=2500, acct="sav")
+        llm = ApproveEverythingLLM()
+
+        self._run([a], [a, b], llm)
+
+        assert [system for system, _ in llm.calls] == [prompts.TRANSFER_SYSTEM]
+        assert a.transferred_id == "b"
+
+    def test_several_candidates_are_judged_in_one_choice_call(self):
+        import actual_cat.prompts as prompts
+
+        a_chk, a_sav, b_chk, b_sav = two_banks_same_day()
+        llm = ApproveEverythingLLM(choice="B")  # candidate B is Bank B Checking
+
+        audit = self._run([b_sav], [a_chk, b_chk, b_sav], llm)
+
+        assert len(llm.calls) == 1
+        system, user = llm.calls[0]
+        assert system == prompts.TRANSFER_CHOICE_SYSTEM
+        assert "Candidate A:" in user and "Candidate B:" in user
+        assert b_sav.transferred_id == "b-chk"
+        assert b_chk.transferred_id == "b-sav"
+        assert a_chk.transferred_id is None  # the other candidate is untouched
+        assert a_chk.notes == "RECURRING TRANSFER TO SAVINGS REF #X1"
+        extra = audit.log.call_args.kwargs["extra"]
+        assert extra["partner_id"] == "b-chk"
+        assert extra["candidate_ids"] == ["a-chk", "b-chk"]
+
+    def test_choice_below_threshold_tags_only_the_chosen_pair(self):
+        a_chk, _, b_chk, b_sav = two_banks_same_day()
+        llm = ApproveEverythingLLM(choice="B", confidence="medium")
+
+        audit = self._run([b_sav], [a_chk, b_chk, b_sav], llm)
+
+        assert b_sav.transferred_id is None
+        assert "#ai-suggested-transfer" in b_sav.notes
+        assert "#ai-suggested-transfer" in b_chk.notes
+        assert "#ai-suggested-transfer" not in a_chk.notes
+        assert audit.log.call_args.kwargs["action"] == "tagged"
+
+    @pytest.mark.parametrize("choice", ["ambiguous", "Z", "", None])
+    def test_ambiguous_or_unknown_choice_holds_every_row_for_review(self, choice):
+        a_chk, _, b_chk, b_sav = two_banks_same_day()
+        llm = ApproveEverythingLLM(choice=choice)
+
+        audit = self._run([b_sav], [a_chk, b_chk, b_sav], llm)
+
+        for row in (b_sav, a_chk, b_chk):
+            assert row.transferred_id is None
+            assert "#ai-suggested-transfer" in row.notes
+        kwargs = audit.log.call_args.kwargs
+        assert kwargs["mode"] == "transfer-ambiguous"
+        assert kwargs["action"] == "tagged"
+        assert kwargs["extra"]["candidate_ids"] == ["a-chk", "b-chk"]
+
+    def test_none_rejects_without_tagging(self):
+        a_chk, _, b_chk, b_sav = two_banks_same_day()
+        llm = ApproveEverythingLLM(choice="none")
+
+        audit = self._run([b_sav], [a_chk, b_chk, b_sav], llm)
+
+        for row in (b_sav, a_chk, b_chk):
+            assert row.transferred_id is None
+            assert "#ai-" not in (row.notes or "")
+        assert audit.log.call_args.kwargs["mode"] == "transfer-rejected"
+
+    def test_choice_llm_error_logs_failure(self):
+        a_chk, _, b_chk, b_sav = two_banks_same_day()
+        llm = MockLLM([{"error": "LLM call failure: timeout"}])
+
+        audit = self._run([b_sav], [a_chk, b_chk, b_sav], llm)
+
+        audit.log_failure.assert_called_once()
+        assert b_sav.transferred_id is None
+
+    def test_refused_pairing_is_logged_and_the_run_continues(self):
+        a = make_txn(id="a", amount=-2500, acct="chk")
+        b = make_txn(id="b", amount=2500, acct="sav")
+        c = make_txn(id="c", amount=-4000, acct="chk")
+        d = make_txn(id="d", amount=4000, acct="sav")
+        llm = ApproveEverythingLLM()
+
+        with patch("actual_cat.transfers.pair_as_transfer",
+                   side_effect=[ValueError("b is already linked to x"), None]):
+            audit = self._run([a, c], [a, b, c, d], llm)
+
+        audit.log_failure.assert_called_once()
+        assert "already linked" in audit.log_failure.call_args.args[1]
+        assert "#ai-assisted" not in (a.notes or "")  # nothing written for the refusal
+        assert len(llm.calls) == 2  # c was still evaluated
+        assert audit.log.call_args.kwargs["action"] == "paired"
+
+
 class TestRepairTransferPairs:
     """repair_transfer_pairs() re-asserts the transfer invariant that bank-sync
     reconciliation silently breaks: payee_id/category_id are fair game to fix on
@@ -357,6 +600,7 @@ class TestRepairTransferPairs:
         partner.payee_id = "xferpayee-Checking"
         partner.notes = "#ai-assisted"
         txn.transfer = partner
+        partner.transferred_id = txn.id
 
         repaired, audit = self._run([txn])
 
@@ -375,6 +619,7 @@ class TestRepairTransferPairs:
         partner.payee_id = "xferpayee-Checking"
         partner.notes = None  # partner was never AI-tagged
         txn.transfer = partner
+        partner.transferred_id = txn.id
 
         repaired, _ = self._run([txn])
 
@@ -392,6 +637,7 @@ class TestRepairTransferPairs:
         partner.payee_id = "xferpayee-Checking"
         partner.notes = None
         txn.transfer = partner
+        partner.transferred_id = txn.id
 
         repaired, _ = self._run([txn])
 
@@ -407,6 +653,7 @@ class TestRepairTransferPairs:
         txn.notes = "#ai-assisted"
         partner.notes = "#ai-assisted"
         txn.transfer = partner
+        partner.transferred_id = txn.id
 
         repaired, audit = self._run([txn])
 
@@ -427,6 +674,23 @@ class TestRepairTransferPairs:
         assert txn.payee_id == "merchant-payee"  # untouched
         audit.log.assert_called_once()
         assert audit.log.call_args.kwargs["action"] == "orphaned"
+
+    def test_non_reciprocal_link_reported_not_repaired(self):
+        # The ISSUE-028 chain: txn points at partner, but partner points at a
+        # third row. Repairing txn against partner would assert the wrong payee.
+        txn = make_txn(id="a", account_name="Bank A Checking", transferred_id="b")
+        partner = make_txn(id="b", account_name="Bank B Savings", transferred_id="c")
+        txn.payee_id = "merchant-payee"
+        txn.transfer = partner
+
+        repaired, audit = self._run([txn])
+
+        assert repaired == 0
+        assert txn.payee_id == "merchant-payee"  # untouched
+        audit.log.assert_called_once()
+        kwargs = audit.log.call_args.kwargs
+        assert kwargs["action"] == "non-reciprocal"
+        assert kwargs["extra"] == {"partner_id": "b", "partner_transferred_id": "c"}
 
 
 class TestRelinkRecreatedTransfers:

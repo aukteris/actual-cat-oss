@@ -1,6 +1,8 @@
 """Transfer detection pipeline — inverse-amount pair evaluation."""
 
+import re
 from datetime import timedelta
+from string import ascii_uppercase
 from typing import TYPE_CHECKING, Any
 
 from .sync_meta import is_pending
@@ -52,32 +54,27 @@ def find_transfer_candidates(
     return list(candidates)
 
 
+def _describe_transaction(txn: Any) -> str:
+    """The bullet block both transfer prompts use to show one transaction."""
+    payee = txn.imported_description or (txn.payee.name if txn.payee else "(none)")
+    acct = txn.account
+    notes = re.sub(r"\s*#ai-\S+", "", txn.notes or "").strip() or "(none)"
+    return f"""- Account: {acct.name} ({'off-budget' if acct.offbudget else 'on-budget'})
+- Date: {txn.get_date()}
+- Payee (friendly name): {payee}
+- Raw descriptor: {notes}
+- Amount: {txn.amount / 100:+.2f} USD"""
+
+
 def render_transfer_prompt(txn_a: Any, txn_b: Any) -> str:
-    payee_a = txn_a.imported_description or (txn_a.payee.name if txn_a.payee else "(none)")
-    payee_b = txn_b.imported_description or (txn_b.payee.name if txn_b.payee else "(none)")
-    acct_a = txn_a.account
-    acct_b = txn_b.account
-
-    import re
-    def clean_notes(t: Any) -> str:
-        return re.sub(r"\s*#ai-\S+", "", t.notes or "").strip() or "(none)"
-
     return f"""Two uncategorized transactions with matching inverse amounts within
 a few days. Evaluate whether they represent a transfer between accounts.
 
 Transaction A:
-- Account: {acct_a.name} ({'off-budget' if acct_a.offbudget else 'on-budget'})
-- Date: {txn_a.get_date()}
-- Payee (friendly name): {payee_a}
-- Raw descriptor: {clean_notes(txn_a)}
-- Amount: {txn_a.amount / 100:+.2f} USD
+{_describe_transaction(txn_a)}
 
 Transaction B:
-- Account: {acct_b.name} ({'off-budget' if acct_b.offbudget else 'on-budget'})
-- Date: {txn_b.get_date()}
-- Payee (friendly name): {payee_b}
-- Raw descriptor: {clean_notes(txn_b)}
-- Amount: {txn_b.amount / 100:+.2f} USD
+{_describe_transaction(txn_b)}
 
 Is this a transfer between accounts? Consider account semantics (a card
 payment from checking to a credit card tracked in this budget is a transfer,
@@ -85,6 +82,30 @@ as is checking -> savings; paying an off-budget loan or an external merchant
 is not), payee/memo content, and date alignment.
 
 Return JSON.
+"""
+
+
+def render_transfer_choice_prompt(txn: Any, candidates: list[Any]) -> str:
+    """One driving transaction against every candidate at once, lettered A, B, ...
+
+    Judging each pair in isolation is what chained two same-day transfers across
+    banks (ISSUE-028): any two of the user's own accounts with "transfer" in the
+    descriptor look like a transfer, so whichever candidate came first won.
+    """
+    blocks = "\n\n".join(
+        f"Candidate {letter}:\n{_describe_transaction(candidate)}"
+        for letter, candidate in zip(ascii_uppercase, candidates)
+    )
+    return f"""One uncategorized transaction has {len(candidates)} transactions in other
+accounts with the matching inverse amount within a few days. Money moved once,
+so at most one of them is the other leg of a transfer.
+
+Transaction:
+{_describe_transaction(txn)}
+
+{blocks}
+
+Which candidate, if any, is the other leg of this transfer? Return JSON.
 """
 
 
@@ -96,7 +117,18 @@ def pair_as_transfer(txn_a: Any, txn_b: Any) -> None:
     transferred_id, the *other* account's transfer payee (account.payee), and
     no spending category. Setting transferred_id alone produces a malformed pair
     that Actual doesn't recognize as a transfer.
+
+    Refuses to overwrite a link to a third row. Doing so silently is how one run
+    chained two same-day transfers into A→B→C→D instead of two pairs, which a
+    later UI save in Actual turned into a duplicated row (ISSUE-028).
     """
+    for leg, other in ((txn_a, txn_b), (txn_b, txn_a)):
+        if leg.transferred_id is not None and leg.transferred_id != other.id:
+            raise ValueError(
+                f"{leg.id} is already linked to {leg.transferred_id}; "
+                f"refusing to re-pair it with {other.id}"
+            )
+
     txn_a.payee_id = txn_b.account.payee.id
     txn_b.payee_id = txn_a.account.payee.id
     txn_a.transferred_id = txn_b.id
@@ -145,6 +177,13 @@ def classify_transfer_leg(txn: Any, partner: Any | None) -> tuple[str, dict[str,
     if partner is None:
         return "orphaned", {}
 
+    # A one-way link names the wrong partner for at least one leg, so
+    # "repairing" against it would assert the wrong transfer payee — and every
+    # run would re-assert it, as happened for three days before ISSUE-028 was
+    # found. Nothing safe can be inferred; report it like an orphan.
+    if partner.transferred_id != txn.id:
+        return "non_reciprocal", {}
+
     fields = compute_transfer_repair(txn, partner)
     if not fields:
         return "healthy", {}
@@ -189,6 +228,16 @@ def repair_transfer_pairs(actual: Any, audit: "AuditLogger") -> int:
             audit.log(
                 txn, {}, mode="repair", action="orphaned", pipeline="transfer",
                 extra={"partner_id": txn.transferred_id},
+            )
+            continue
+
+        if label == "non_reciprocal":
+            audit.log(
+                txn, {}, mode="repair", action="non-reciprocal", pipeline="transfer",
+                extra={
+                    "partner_id": txn.transferred_id,
+                    "partner_transferred_id": txn.transfer.transferred_id,
+                },
             )
             continue
 
@@ -336,6 +385,150 @@ def partner_state(partner: Any) -> dict[str, Any]:
     }
 
 
+def _choice_index(choice: Any, count: int) -> int | None:
+    """The candidate a lettered choice names, or None if it names none of them."""
+    letter = str(choice).strip().upper()
+    if len(letter) == 1 and letter in ascii_uppercase[:count]:
+        return ascii_uppercase.index(letter)
+    return None
+
+
+def _conclude_transfer(
+    txn: Any,
+    partner: Any,
+    response: dict[str, Any],
+    audit: "AuditLogger",
+    cfg: "Config",
+    handled: set[str],
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Pair or tag txn and partner once the model has said they are a transfer."""
+    confidence = response.get("confidence", "low")
+    should_apply = (
+        cfg.transfer_mode == "apply"
+        and confidence == cfg.transfer_threshold
+    )
+
+    if should_apply:
+        try:
+            pair_as_transfer(txn, partner)
+        except ValueError as e:
+            audit.log_failure(txn, str(e), pipeline="transfer")
+            return
+
+    # A leg categorized on an earlier run (before its partner posted)
+    # carries a stale #ai:<category> tag; drop it now that we've
+    # concluded this is a transfer.
+    txn.notes = strip_category_tag(txn.notes)
+    partner.notes = strip_category_tag(partner.notes)
+
+    if should_apply:
+        txn.notes = append_tag(txn.notes, "#ai-assisted")
+        partner.notes = append_tag(partner.notes, "#ai-assisted")
+        action = "paired"
+    else:
+        txn.notes = append_tag(txn.notes, "#ai-suggested-transfer")
+        partner.notes = append_tag(partner.notes, "#ai-suggested-transfer")
+        action = "tagged"
+
+    handled.update((txn.id, partner.id))
+    audit.log(
+        txn, response, mode=cfg.transfer_mode, action=action,
+        pipeline="transfer",
+        extra={"partner_id": partner.id, **partner_state(partner), **(extra or {})},
+    )
+
+
+def _evaluate_pair(
+    txn: Any,
+    partner: Any,
+    llm: "LLMClient",
+    audit: "AuditLogger",
+    cfg: "Config",
+    prompts: Any,
+    handled: set[str],
+) -> None:
+    response = llm.complete_json(
+        prompts.TRANSFER_SYSTEM, render_transfer_prompt(txn, partner)
+    )
+
+    if "error" in response:
+        audit.log_failure(txn, response["error"], pipeline="transfer")
+        return
+
+    if not response.get("is_transfer", False):
+        audit.log(
+            txn, response, mode="transfer-rejected", action="none",
+            pipeline="transfer",
+            extra={"partner_id": partner.id, **partner_state(partner)},
+        )
+        return
+
+    _conclude_transfer(txn, partner, response, audit, cfg, handled)
+
+
+def _evaluate_choice(
+    txn: Any,
+    candidates: list[Any],
+    llm: "LLMClient",
+    audit: "AuditLogger",
+    cfg: "Config",
+    prompts: Any,
+    handled: set[str],
+) -> None:
+    """Ask once which of several candidates is txn's partner, and hold on ambiguity.
+
+    "ambiguous" — or a letter naming no candidate — tags every row involved
+    #ai-suggested-transfer rather than ranking a guess, as
+    duplicates.propose_candidates does. The tag also keeps categorization from
+    booking these rows as spending while they wait for review.
+    """
+    candidate_ids = [c.id for c in candidates]
+
+    if len(candidates) > len(ascii_uppercase):
+        audit.log_failure(
+            txn, f"{len(candidates)} transfer candidates, too many to compare",
+            pipeline="transfer",
+        )
+        return
+
+    response = llm.complete_json(
+        prompts.TRANSFER_CHOICE_SYSTEM, render_transfer_choice_prompt(txn, candidates)
+    )
+
+    if "error" in response:
+        audit.log_failure(txn, response["error"], pipeline="transfer")
+        return
+
+    # str() is deliberately not applied: a missing choice would become "None",
+    # which lowercases to a rejection instead of a hold.
+    raw_choice = response.get("choice")
+    choice = raw_choice.strip().lower() if isinstance(raw_choice, str) else ""
+
+    if choice == "none":
+        audit.log(
+            txn, response, mode="transfer-rejected", action="none",
+            pipeline="transfer", extra={"candidate_ids": candidate_ids},
+        )
+        return
+
+    index = _choice_index(choice, len(candidates))
+    if index is None:
+        for row in (txn, *candidates):
+            row.notes = append_tag(strip_category_tag(row.notes), "#ai-suggested-transfer")
+            handled.add(row.id)
+        audit.log(
+            txn, response, mode="transfer-ambiguous", action="tagged",
+            pipeline="transfer", extra={"candidate_ids": candidate_ids},
+        )
+        return
+
+    _conclude_transfer(
+        txn, candidates[index], response, audit, cfg, handled,
+        extra={"candidate_ids": candidate_ids},
+    )
+
+
 def process_transfers(
     actual: Any,
     llm: "LLMClient",
@@ -346,61 +539,35 @@ def process_transfers(
     from .categorization import find_uncategorized
 
     candidates_seen: set[tuple[str, str]] = set()
+    # Rows paired or tagged earlier in this run. The driving list is computed
+    # once up front and never refreshed, so without this a row linked as some
+    # earlier row's partner would still be driven later and re-paired.
+    handled: set[str] = set()
     txns = find_uncategorized(actual.session, cfg.duplicates_defer_pending)
 
     for txn in txns:
-        candidates = find_transfer_candidates(
-            actual.session, txn, cfg.transfer_window_days, cfg.duplicates_defer_pending
-        )
+        if txn.id in handled or txn.transferred_id is not None:
+            continue
+
+        candidates = [
+            c for c in find_transfer_candidates(
+                actual.session, txn, cfg.transfer_window_days, cfg.duplicates_defer_pending
+            )
+            if c.id not in handled and c.transferred_id is None
+        ]
+
+        if len(candidates) > 1:
+            # Several candidates are judged together, even if some pairs were
+            # already seen from the other side: seeing them one at a time is
+            # exactly what lets the first plausible one win.
+            for c in candidates:
+                candidates_seen.add(tuple(sorted([txn.id, c.id])))
+            _evaluate_choice(txn, candidates, llm, audit, cfg, prompts, handled)
+            continue
 
         for partner in candidates:
             pair_id = tuple(sorted([txn.id, partner.id]))
             if pair_id in candidates_seen:
                 continue
             candidates_seen.add(pair_id)
-
-            response = llm.complete_json(
-                prompts.TRANSFER_SYSTEM, render_transfer_prompt(txn, partner)
-            )
-
-            if "error" in response:
-                audit.log_failure(txn, response["error"], pipeline="transfer")
-                continue
-
-            is_transfer = response.get("is_transfer", False)
-            confidence = response.get("confidence", "low")
-
-            if not is_transfer:
-                audit.log(
-                    txn, response, mode="transfer-rejected", action="none",
-                    pipeline="transfer",
-                    extra={"partner_id": partner.id, **partner_state(partner)},
-                )
-                continue
-
-            should_apply = (
-                cfg.transfer_mode == "apply"
-                and confidence == cfg.transfer_threshold
-            )
-
-            # A leg categorized on an earlier run (before its partner posted)
-            # carries a stale #ai:<category> tag; drop it now that we've
-            # concluded this is a transfer.
-            txn.notes = strip_category_tag(txn.notes)
-            partner.notes = strip_category_tag(partner.notes)
-
-            if should_apply:
-                pair_as_transfer(txn, partner)
-                txn.notes = append_tag(txn.notes, "#ai-assisted")
-                partner.notes = append_tag(partner.notes, "#ai-assisted")
-                action = "paired"
-            else:
-                txn.notes = append_tag(txn.notes, "#ai-suggested-transfer")
-                partner.notes = append_tag(partner.notes, "#ai-suggested-transfer")
-                action = "tagged"
-
-            audit.log(
-                txn, response, mode=cfg.transfer_mode, action=action,
-                pipeline="transfer",
-                extra={"partner_id": partner.id, **partner_state(partner)},
-            )
+            _evaluate_pair(txn, partner, llm, audit, cfg, prompts, handled)

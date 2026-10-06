@@ -35,7 +35,20 @@ corpus is a personal financial record):
       ]
     }
 
-`offbudget` may be set on either side and defaults to false. Ground truth is each
+`offbudget` may be set on either side and defaults to false. `payee` is optional:
+in a real row the friendly payee (imported_description) and the raw descriptor
+(notes) usually differ, and it defaults to the descriptor when omitted.
+
+A row with two or more candidates goes to a different prompt, TRANSFER_CHOICE_SYSTEM,
+which picks one candidate or none (ISSUE-028). Those cases carry "kind": "choice":
+
+    {"kind": "choice", "label": "two banks, same day", "expect": "B",
+     "driving": {"account": "Bank B Savings", ...},
+     "candidates": [{"account": "Bank A Checking", ...},
+                    {"account": "Bank B Checking", ...}]}
+
+`expect` is a candidate letter, "none" or "ambiguous". A letter only passes at the
+threshold confidence, for the same reason a pairwise positive does. Ground truth is each
 pair's historical audit-log decision, re-checked by hand. A corpus is worth keeping
 balanced: the credit-card and checking<->savings positives, plus the negatives that
 must keep being rejected (off-budget loan/mortgage payments, coincidental amounts).
@@ -66,7 +79,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from actual_cat import prompts  # noqa: E402
 from actual_cat.config import _load_llm_profiles  # noqa: E402
 from actual_cat.llm import LLMClient  # noqa: E402
-from actual_cat.transfers import render_transfer_prompt  # noqa: E402
+from actual_cat.transfers import (  # noqa: E402
+    render_transfer_choice_prompt,
+    render_transfer_prompt,
+)
 
 
 class _Acct:
@@ -79,9 +95,9 @@ class _Txn:
     """The subset of a Transactions row that render_transfer_prompt reads."""
 
     def __init__(self, account: str, date: str, descriptor: str, amount: int,
-                 offbudget: bool = False) -> None:
+                 offbudget: bool = False, payee: str | None = None) -> None:
         self.account = _Acct(account, offbudget)
-        self.imported_description = descriptor
+        self.imported_description = payee or descriptor
         self.payee = None
         self.notes = descriptor
         self.amount = amount
@@ -98,6 +114,7 @@ def _txn(raw: dict[str, Any]) -> _Txn:
         descriptor=raw["descriptor"],
         amount=int(raw["amount"]),
         offbudget=bool(raw.get("offbudget", False)),
+        payee=raw.get("payee"),
     )
 
 
@@ -138,30 +155,46 @@ def main() -> int:
 
     for case in cases:
         label = case["label"]
-        want = bool(case["expect"])
-        txn_a, txn_b = _txn(case["a"]), _txn(case["b"])
+        if case.get("kind") == "choice":
+            want = str(case["expect"]).lower()
+            driving = _txn(case["driving"])
+            candidates = [_txn(c) for c in case["candidates"]]
+            system = prompts.TRANSFER_CHOICE_SYSTEM
+            user = render_transfer_choice_prompt(driving, candidates)
+            verdict_key = "choice"
+        else:
+            want = bool(case["expect"])
+            system = prompts.TRANSFER_SYSTEM
+            user = render_transfer_prompt(_txn(case["a"]), _txn(case["b"]))
+            verdict_key = "is_transfer"
 
         verdicts: list[object] = []
         confs: list[str] = []
         reasons: list[str] = []
         for _ in range(args.runs):
-            out = llm.complete_json(
-                prompts.TRANSFER_SYSTEM, render_transfer_prompt(txn_a, txn_b)
-            )
+            out = llm.complete_json(system, user)
             if "error" in out:
                 verdicts.append("ERR")
                 confs.append("-")
                 reasons.append(str(out["error"])[:120])
                 continue
-            verdicts.append(out.get("is_transfer"))
+            verdict = out.get(verdict_key)
+            if verdict_key == "choice" and isinstance(verdict, str):
+                verdict = verdict.strip().lower()
+            verdicts.append(verdict)
             confs.append(str(out.get("confidence")))
             reasons.append(str(out.get("reasoning", ""))[:160])
 
-        verdict_ok = all(v is want for v in verdicts)
-        # A positive that lands below the threshold is still a miss: the pipeline
-        # tags it #ai-suggested-transfer, which excludes it from find_uncategorized
-        # for good, so nothing revisits it later.
-        conf_ok = (not want) or all(c == args.threshold for c in confs)
+        if verdict_key == "choice":
+            verdict_ok = all(v == want for v in verdicts)
+            # Only a picked candidate pairs, so only a pick needs the threshold.
+            conf_ok = want in ("none", "ambiguous") or all(c == args.threshold for c in confs)
+        else:
+            verdict_ok = all(v is want for v in verdicts)
+            # A positive that lands below the threshold is still a miss: the pipeline
+            # tags it #ai-suggested-transfer, which excludes it from find_uncategorized
+            # for good, so nothing revisits it later.
+            conf_ok = (not want) or all(c == args.threshold for c in confs)
         ok = verdict_ok and conf_ok
         if not ok:
             failures += 1

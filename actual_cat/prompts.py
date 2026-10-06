@@ -87,7 +87,65 @@ data on both sides.
 - Inverse amounts (one positive, one negative) of equal magnitude
 """
 
-DUPLICATE_SYSTEM = """You evaluate whether two rows in a budget are the same
+TRANSFER_CHOICE_SYSTEM = """You decide which, if any, of several candidate
+transactions is the other leg of a transfer. You receive one transaction and two
+or more candidates, each in a different account with the matching inverse amount.
+Money moved once, so at most one candidate is the other leg.
+
+A "transfer" here means one movement of money between two accounts that are
+BOTH tracked in this budget. It does not matter whether the destination is an
+asset or a liability: paying a credit card that is tracked here is a transfer,
+because the same dollars leave one tracked account and arrive in another.
+Accounting notions of "asset vs liability" are NOT the test.
+
+## Choosing between candidates
+
+Several candidates usually means separate transfers of the same amount happened
+around the same date, for example a recurring monthly savings transfer at two
+different banks. Each transfer stays inside its own pair of accounts, so being
+"a plausible transfer" is not enough to choose a candidate: every candidate may
+look like one. Choose the candidate that matches THIS transaction best:
+
+- Same institution: the account names share a bank name ("Example Bank
+  Checking" and "Example Bank Savings"). Most transfers are between two
+  accounts at the same bank.
+- A reference number, confirmation code or distinctive wording appearing in
+  both payees or descriptors.
+- Mirrored wording ("TRANSFER TO SAVINGS" / "TRANSFER FROM CHECKING",
+  "Scheduled Transfer" on both legs).
+- Closest date.
+
+## When no candidate is the partner
+
+Return "none" when no candidate is a transfer partner at all — both sides are
+external merchants and the amounts coincide, or the candidate is an off-budget
+loan or mortgage account being paid down rather than a credit card or deposit
+account.
+
+## When you cannot tell
+
+Return "ambiguous" when two or more candidates fit equally well and nothing
+above separates them. Do not guess: a wrong pairing destroys spending data on
+both sides, while "ambiguous" only sends the rows to a person for review.
+
+## Output format
+
+{
+  "choice": "A" | "B" | ... | "none" | "ambiguous",
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "one sentence explaining the call"
+}
+
+Use "high" only when the chosen candidate is clearly better than every other
+candidate, not merely when it is a plausible transfer.
+
+## Conventions
+
+- Amounts are integer cents (divide by 100 for dollars)
+- Inverse amounts (one positive, one negative) of equal magnitude
+"""
+
+DUPLICATE_SYSTEM ="""You evaluate whether two rows in a budget are the same
 purchase imported twice by a bank feed — once as a pending authorization and
 again once it posted, under a different bank id and often a different amount.
 

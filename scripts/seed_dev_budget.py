@@ -15,6 +15,8 @@ Covers:
   - Credit-card payment pair (Checking -> CC, PMT descriptor)
   - Coincidental amount match between two unrelated merchants
   - Pending/posted duplicate shapes, with --duplicates
+  - Two same-day, same-amount transfers at two different banks, with
+    --transfer-chain (ISSUE-028: these were once chained across banks)
 
 Run:
   ACTUAL_PASSWORD=... python scripts/seed_dev_budget.py
@@ -32,7 +34,12 @@ os.environ["REQUESTS_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
 os.environ["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt"
 
 from actual import Actual
-from actual.queries import create_transaction, get_accounts, get_category_groups
+from actual.queries import (
+    create_account,
+    create_transaction,
+    get_accounts,
+    get_category_groups,
+)
 from dotenv import load_dotenv
 
 
@@ -57,6 +64,9 @@ parser.add_argument("--receipts", action="store_true",
 parser.add_argument("--duplicates", action="store_true",
                     help="Also seed pending/posted duplicate fixtures (and two lookalikes "
                          "that must NOT match)")
+parser.add_argument("--transfer-chain", action="store_true",
+                    help="Also seed two same-day $25 checking -> savings transfers at two "
+                         "banks, creating the four bank accounts if missing")
 parser.add_argument("--store-path", default="receipts",
                     help="Receipt store path (default: receipts)")
 args = parser.parse_args()
@@ -170,6 +180,29 @@ with Actual(base_url=BASE_URL, password=password, file=BUDGET_FILE) as actual:
     add(cc, -75.00, "Netflix",
         notes="NETFLIX.COM LOS GATOS 95032 CA USA",
         days_ago=11)
+
+    if args.transfer_chain:
+        print("\nSeeding two-bank transfer chain fixture...")
+
+        # Every leg has two inverse-amount candidates in other accounts, and every
+        # cross-bank pairing reads like a plausible transfer. Only the institution
+        # and the shared reference number tell the two transfers apart.
+        def bank_account(name):
+            if name not in accounts:
+                accounts[name] = create_account(actual.session, name)
+                print(f"  Created account: {name}")
+            return accounts[name]
+
+        add(bank_account("Example Bank Checking"), -25.00, "Recurring Transfer to Savings",
+            notes="RECURRING TRANSFER TO SAVINGS REF #AB12CD XXXXXX1111",
+            days_ago=2, key="-chain-a")
+        add(bank_account("Example Bank Savings"), 25.00, "Recurring Transfer from Checking",
+            notes="RECURRING TRANSFER FROM CHECKING REF #AB12CD XXXXXX2222",
+            days_ago=2, key="-chain-a")
+        add(bank_account("Sample Credit Union Checking"), -25.00, "Scheduled Transfer",
+            notes="Start Scheduled Transfer", days_ago=2, key="-chain-b")
+        add(bank_account("Sample Credit Union Savings"), 25.00, "Scheduled Transfer",
+            notes="Start Scheduled Transfer Deposit", days_ago=2, key="-chain-b-dep")
 
     if args.duplicates:
         print("\nSeeding pending-duplicate fixtures...")
